@@ -18,36 +18,155 @@
 /* Change history and recycle bin */
 .history-tabs{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px}.history-filters{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:22px 0 16px;align-items:end}.history-filters .field{min-width:0}.history-filters .field>span{display:block;font-size:11px;color:#846993;margin-bottom:7px}.history-search{grid-column:span 2}.history-results{margin-top:20px;display:grid;gap:12px}.history-card,.recycle-card{border:1px solid var(--line);border-radius:14px;padding:18px;background:#fdfbff;min-width:0}.history-card-title{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:10px}.history-card h3,.recycle-card h3{font-size:15px;line-height:1.5;margin:9px 0 5px;overflow-wrap:anywhere}.history-card p,.recycle-card p{line-height:1.8;overflow-wrap:anywhere}.history-kind.added,.history-kind.restored{background:#eaf5ee;color:#397755}.history-kind.deleted{background:#fbeaf1;color:#a24f72}.history-kind.updated{background:#efe7fa;color:#7650ad}.history-pagination{display:flex;justify-content:space-between;align-items:center;gap:15px;margin-top:22px;flex-wrap:wrap}.history-meta{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}.history-diff{table-layout:fixed;width:100%;min-width:0}.history-diff td{white-space:normal;overflow-wrap:anywhere;vertical-align:top;min-width:0}.history-diff th:first-child{width:26%}.history-section .card-head{flex-wrap:wrap;gap:12px}.history-pagination .row{display:flex;gap:8px}.history-card .button,.recycle-card .button{flex-shrink:0}.history-section button:disabled{opacity:.5;cursor:not-allowed}
 @media(max-width:650px){.history-filters{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.history-search{grid-column:1/-1}.history-card,.recycle-card{padding:14px}.history-card-title{gap:9px}.history-card h3,.recycle-card h3{font-size:14px}.history-card-title .button{font-size:10px;padding:8px}.history-card .sub,.recycle-card .sub{font-size:10px}.history-tabs .button{flex:1;font-size:11px;padding:11px 9px}.mobile-nav button{min-width:0;font-size:7px}.mobile-nav button span{max-width:100%;overflow:hidden;text-overflow:ellipsis}.history-pagination{align-items:flex-start}}
-</style><link rel="manifest" href="./manifest.webmanifest"><link rel="apple-touch-icon" href="./icons/apple-touch-icon.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Ghar"><meta name="apple-mobile-web-app-status-bar-style" content="default"><script src="./app-config.js"></script><script src="https://accounts.google.com/gsi/client" async defer></script><script>/* Google-hosted API executable transport for the installed web app.
-   OAuth tokens stay in memory. All identity, membership and write checks run in Code.gs. */
+
+.device-memory{display:grid;gap:8px;margin:16px 0 18px}
+.device-memory .checkbox{align-items:flex-start;gap:8px}
+.device-memory .checkbox input{margin-top:4px}
+.device-memory .sub{margin:0;line-height:1.6}
+.remembered-account{overflow-wrap:anywhere}
+</style>
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Ghar">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<script src="./app-config.js"></script>
+<script id="google-auth-library" src="https://accounts.google.com/gsi/client" async defer></script>
+<script>/* Google-hosted API executable transport. The server verifies Google identity
+   and sheet access. Opt-in device memory keeps only the current OAuth grant
+   and account hint, bounded by Google's expiry and the 90-day device window. */
 var GharWebAPI=(function(){
   'use strict';
   var SCOPES=['https://www.googleapis.com/auth/spreadsheets','https://www.googleapis.com/auth/userinfo.email'];
+  var DEVICE_WINDOW=90*86400000,EXPIRY_MARGIN=30000;
   function create(env){
     var token='',expiresAt=0,authorizing=false;
+    var verifiedEmail='',rememberRequested=false,device=null,persistenceAvailable=true;
+    var automaticAccount=null,cancelSilent=null;
     function config(){var c=env.config||{};return {clientId:String(c.clientId||'').trim(),deploymentId:String(c.deploymentId||'').trim()};}
     function configured(){var c=config();return /^[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$/.test(c.clientId)&&/^[A-Za-z0-9_-]{20,200}$/.test(c.deploymentId);}
     function failure(code,message){var e=new Error(message);e.code=code;return e;}
-    function clear(){token='';expiresAt=0;}
-    function authorize(){
+    function deviceKey(){
+      var c=config();
+      return 'ghar-google-device-v1:'+env.appUrl().replace(/\/index\.html$/,'/')+':'+c.clientId+':'+c.deploymentId;
+    }
+    function writeDevice(record){
+      device=record;
+      if(!env.storage)return;
+      try{
+        var storage=env.storage();
+        if(record)storage.setItem(deviceKey(),JSON.stringify(record));
+        else storage.removeItem(deviceKey());
+        persistenceAvailable=true;
+      }catch(e){persistenceAvailable=false;}
+    }
+    function hintOnly(){
+      if(!device||!device.token)return;
+      writeDevice({email:device.email,rememberedAt:device.rememberedAt});
+    }
+    function rememberedDevice(){
+      if(device&&device.rememberedAt+DEVICE_WINDOW<=env.now())writeDevice(null);
+      return device?{email:device.email,until:device.rememberedAt+DEVICE_WINDOW}:null;
+    }
+    function clearAccess(){
+      token='';
+      expiresAt=0;
+      automaticAccount=null;
+      hintOnly();
+    }
+    function hasSession(){
+      rememberedDevice();
+      if(token&&expiresAt>env.now()+EXPIRY_MARGIN)return true;
+      clearAccess();
+      return false;
+    }
+    function restoreDevice(){
+      if(!configured()||!env.storage)return;
+      try{
+        var record=JSON.parse(env.storage().getItem(deviceKey())||'null');
+        if(!record)return;
+        var now=env.now();
+        if(typeof record.email!=='string'||!record.email.includes('@')||
+           !Number.isFinite(record.rememberedAt)||record.rememberedAt>now||
+           record.rememberedAt+DEVICE_WINDOW<=now){
+          writeDevice(null);
+          return;
+        }
+        device=record;
+        if(typeof record.token==='string'&&record.token&&Number.isFinite(record.expiresAt)){
+          token=record.token;
+          expiresAt=Math.min(record.expiresAt,record.rememberedAt+DEVICE_WINDOW);
+          automaticAccount=rememberedDevice();
+        }
+        rememberRequested=true;
+        hasSession();
+      }catch(e){writeDevice(null);}
+    }
+    function verifyDevice(result){
+      var email=result&&result.profile&&result.profile.email;
+      if(automaticAccount&&(email!==automaticAccount.email||env.now()>=automaticAccount.until)){
+        clearAccess();
+        throw failure('AUTH_REQUIRED','Continue with Google to verify this device again.');
+      }
+      automaticAccount=null;
+      if(typeof email!=='string'||!email.includes('@'))return;
+      verifiedEmail=email;
+      if(!rememberRequested)return;
+      rememberedDevice();
+      var rememberedAt=device&&device.email===email?device.rememberedAt:env.now();
+      writeDevice({email:email,rememberedAt:rememberedAt,token:token,
+        expiresAt:Math.min(expiresAt,rememberedAt+DEVICE_WINDOW)});
+    }
+    function authorize(options){
+      options=options||{};
       if(!configured())return Promise.reject(failure('CONFIG','The owner needs to finish the Google connection in MOBILE-SETUP.html.'));
       if(env.online&&env.online()===false)return Promise.reject(failure('OFFLINE','Connect to the internet, then continue with Google.'));
+      if(authorizing&&cancelSilent&&!options.silent)cancelSilent();
       if(authorizing)return Promise.reject(failure('AUTH_PENDING','Finish the Google sign-in window first.'));
       var oauth=env.oauth();if(!oauth)return Promise.reject(failure('GOOGLE_LOAD','Google sign-in has not loaded. Check your connection and try again.'));
+      var remembered=rememberedDevice();
+      if(options.silent&&!remembered)return Promise.reject(failure('AUTH_REQUIRED','Continue with Google to sign in.'));
+      var keep=options.remember===undefined?!!remembered:options.remember===true;
+      var hint=options.chooseAccount?'':(remembered&&remembered.email)||verifiedEmail;
       authorizing=true;
       return new Promise(function(resolve,reject){
-        function fail(code,message){authorizing=false;clear();reject(failure(code,message));}
+        var finished=false,timer;
+        function finish(){
+          if(finished)return false;
+          finished=true;
+          clearTimeout(timer);
+          cancelSilent=null;
+          authorizing=false;
+          return true;
+        }
+        function fail(code,message){if(finish())reject(failure(code,message));}
+        if(options.silent){
+          cancelSilent=function(){fail('AUTH_REQUIRED','Continue with Google to renew access.');};
+          timer=setTimeout(cancelSilent,5000);
+        }
         try{
-          var client=oauth.initTokenClient({client_id:config().clientId,scope:SCOPES.join(' '),include_granted_scopes:false,
+          var tokenConfig={client_id:config().clientId,scope:SCOPES.join(' '),include_granted_scopes:false,
             callback:function(response){
+              if(finished)return;
               if(response.error||!response.access_token){fail('AUTH_REQUIRED',response.error_description||'Google sign-in was not completed. Try again.');return;}
               if(!oauth.hasGrantedAllScopes.apply(oauth,[response].concat(SCOPES))){fail('SCOPES','Approve Google Sheets and email permissions to use the family budget.');return;}
-              token=response.access_token;expiresAt=env.now()+Math.max(0,Number(response.expires_in)||0)*1000;authorizing=false;resolve();
+              var lifetime=Number(response.expires_in)*1000;
+              if(!Number.isFinite(lifetime)||lifetime<=EXPIRY_MARGIN){fail('AUTH_REQUIRED','Google did not return a usable session. Continue with Google again.');return;}
+              finish();
+              token=response.access_token;
+              expiresAt=env.now()+lifetime;
+              automaticAccount=options.silent?remembered:null;
+              rememberRequested=keep;
+              if(!keep)writeDevice(null);
+              else hintOnly();
+              resolve();
             },
             error_callback:function(error){fail('AUTH_REQUIRED',error.type==='popup_failed_to_open'?'Allow the Google sign-in window, then tap Continue with Google again.':'Google sign-in was closed. Your entries have not been changed.');}
-          });
-          // Called directly from a button gesture; never opened by background polling.
-          client.requestAccessToken({prompt:'select_account'});
+          };
+          if(hint)tokenConfig.login_hint=hint;
+          var client=oauth.initTokenClient(tokenConfig);
+          // Only an opted-in device attempts a no-prompt grant on startup.
+          client.requestAccessToken({prompt:options.silent?'none':hint?'':'select_account'});
         }catch(e){fail('AUTH_REQUIRED',e.message||'Could not start Google sign-in.');}
       });
     }
@@ -62,14 +181,18 @@ var GharWebAPI=(function(){
     async function call(action,args){
       if(!configured())throw failure('CONFIG','Finish the Google connection before using live family data.');
       if(env.online&&env.online()===false)throw failure('OFFLINE','You are offline. Connect to the internet before saving. Nothing is queued on this phone.');
-      if(!token||expiresAt-env.now()<=360000)throw failure('AUTH_REQUIRED','Your Google session needs refreshing. Tap Continue with Google, then retry this action.');
+      if(!hasSession())throw failure('AUTH_REQUIRED','Google access needs renewing. Tap Continue with Google, then retry this action.');
+      var requestToken=token;
       var response;
       try{response=await env.fetch('https://script.googleapis.com/v1/scripts/'+encodeURIComponent(config().deploymentId)+':run',{
-        method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},cache:'no-store',credentials:'omit',
+        method:'POST',headers:{'Authorization':'Bearer '+requestToken,'Content-Type':'application/json'},cache:'no-store',credentials:'omit',
         body:JSON.stringify({function:'api',parameters:[Object.assign({},args||{},{action:action})],devMode:false})
       });}catch(e){throw failure('NETWORK','Google could not confirm the result. Keep this form open, check your connection and refresh before retrying.');}
       var body;try{body=await response.json();}catch(e){throw failure('RESPONSE','Google returned an unreadable response. Refresh to check whether the change was saved before retrying.');}
-      if(response.status===401){clear();throw failure('AUTH_REQUIRED','Your Google session expired. Continue with Google, then retry.');}
+      if(response.status===401){
+        if(token===requestToken)clearAccess();
+        throw failure('AUTH_REQUIRED','Google access expired. Continue with Google, then retry.');
+      }
       if(!response.ok){
         var message=body.error&&body.error.message||'Google could not complete this request.';
         if(response.status===403)message+=' Check API deployment access, the matching Google Cloud project, and approved permissions in MOBILE-SETUP.html.';
@@ -79,9 +202,19 @@ var GharWebAPI=(function(){
       if(body.done!==true||!body.response||!body.response.result)throw failure('UNCONFIRMED','Google has not confirmed completion. Refresh to check the result before retrying.');
       var result=body.response.result;
       if(result.ok!==true)throw failure(result.error&&result.error.code||'GOOGLE_ERROR',result.error&&result.error.message||'The family app could not complete this action.');
+      if(action==='bootstrap'&&token===requestToken)verifyDevice(result.result);
       return publicResult(result.result);
     }
-    return {configured:configured,authorize:authorize,call:call,signOut:clear};
+    restoreDevice();
+    return {configured:configured,authorize:authorize,call:call,hasSession:hasSession,rememberedDevice:rememberedDevice,
+      persistenceAvailable:function(){return persistenceAvailable;},
+      signOut:function(){
+        if(cancelSilent)cancelSilent();
+        clearAccess();
+        verifiedEmail='';
+        rememberRequested=false;
+        writeDevice(null);
+      }};
   }
   return {create:create,scopes:SCOPES.slice()};
 })();
@@ -90,6 +223,7 @@ var GharRemote=GharWebAPI.create({
   oauth:function(){return window.google&&google.accounts&&google.accounts.oauth2;},
   online:function(){return navigator.onLine;},now:function(){return Date.now();},
   fetch:function(url,options){return window.fetch(url,options);},
+  storage:function(){return window.localStorage;},
   appUrl:function(){return location.origin+location.pathname;}
 });
 
@@ -110,11 +244,12 @@ var GharPhone=(function(){
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',banner);else banner();
   return {install:install,installed:installed,update:update};
 })();
-</script></head>
+</script>
+</head>
 <body><div id="phone-status" class="phone-status" role="status" hidden></div><a class="skip" href="#main">Skip to content</a><div id="app"><div class="loading"><span class="brand-symbol">g.</span><h1>Opening Ghar…</h1><p>Getting your family space ready.</p></div></div><div id="modal-root"></div><div id="toast" role="status" aria-live="polite"></div><div id="save-progress" class="save-overlay" role="dialog" aria-modal="true" aria-labelledby="save-title" hidden><div class="save-panel" tabindex="-1"><span class="save-spinner" aria-hidden="true"></span><h2 id="save-title">Saving changes…</h2><p>Please wait while your changes are saved.</p></div></div><script>var GHAR_JOIN_ID=(function(){var id=new URLSearchParams(location.search).get("family")||"";return /^[A-Za-z0-9_-]{20,150}$/.test(id)?id:"";})();</script><script>/* Shared validation and accounting rules. No browser or Google dependencies. */
 var GharDomain = (function () {
   'use strict';
-  var VERSION='2.5.0';
+  var VERSION='2.7.0';
   var categories=['Rent','Groceries','Utilities','Home help','EMIs','Health','Family & education','Subscriptions','Travel','Food & outings','Other'];
   var types=['covered','additional','personal','direct','owner'];
   var tables={
@@ -163,6 +298,50 @@ var GharDomain = (function () {
   }
   function c(v){return Math.round(Number(v)*100);}
   function sum(rows){return rows.reduce(function(n,r){return n+c(r.amount);},0)/100;}
+  // The deployed Sheets API already preserves notes and descriptions.
+  // Keep the allocation in those fields so this browser update needs no schema change.
+  function repaymentInfo(value){
+    var content=String(value==null?'':value);
+    var prefix=content.match(/^\[Ghar split: (Plan|Extras)\](?:\s+|$)/);
+    return prefix
+      ? {split:prefix[1].toLowerCase(),text:content.slice(prefix[0].length)}
+      : {split:'total',text:content};
+  }
+  function repaymentValue(value,split,max,allowTotal){
+    var content=String(value==null?'':value).trim();
+    if(allowTotal&&split==='total'){
+      if(repaymentInfo(content).split!=='total')fail('Use the split selector to assign this repayment.');
+      return text(content,max);
+    }
+    if(split!=='plan'&&split!=='extras')fail('Choose Plan or Extras for this repayment.');
+    var prefix='[Ghar split: '+(split==='plan'?'Plan':'Extras')+']';
+    var stored=prefix+(content?' '+content:'');
+    if(stored.length>max)fail('Shorten the '+(max===500?'note':'description')+' to '+(max-prefix.length-1)+' characters for this split.');
+    return stored;
+  }
+  function repaymentAmounts(transfers,expenses){
+    var members=new Map(),hasTotalOnly=false;
+    function bucket(id,split){
+      if(!members.has(id))members.set(id,{});
+      var scopes=members.get(id);
+      if(!scopes[split])scopes[split]={sent:0,received:0,direct:0};
+      if(split==='total')hasTotalOnly=true;
+      return scopes[split];
+    }
+    transfers.forEach(function(row){
+      var split=repaymentInfo(row.note).split,amount=c(row.amount);
+      bucket(row.from,split).sent+=amount;
+      bucket(row.to,split).received+=amount;
+    });
+    expenses.forEach(function(row){
+      if(row.treatment!=='direct')return;
+      var split=repaymentInfo(row.description).split,amount=c(row.amount);
+      bucket(row.recoverFrom,split).direct+=amount;
+      bucket(row.paidBy,split).direct-=amount;
+    });
+    return {members:members,hasTotalOnly:hasTotalOnly};
+  }
+  function repaymentDelta(amounts){return amounts.received-amounts.sent+amounts.direct;}
   function issues(state,period){
     var out=[], ids={};
     if(!state.members.some(function(m){return m.id===state.settings.headId;}))out.push('The head of family does not match a member ID.');
@@ -208,21 +387,36 @@ var GharDomain = (function () {
     var totalCents=mode==='plan'?planCents:mode==='extras'?extraCents:mode==='total'?planCents+extraCents:c(actual);
     // Sum the independently rounded components so Plan + Extras = Total for every member.
     var shares=mode==='plan'?planShares:mode==='extras'?extraShares:mode==='total'?planShares.map(function(x,i){return x+extraShares[i];}):allocate(totalCents,weights);
-    var adjusted=mode==='total'||mode==='actual';
+    var repayments=repaymentAmounts(transfers,expenses),empty={sent:0,received:0,direct:0};
     var lines=included.map(function(m,i){
       var planPaid=budgets.filter(function(b){return b.assignedTo===m.id;}).reduce(function(n,r){return n+c(r.amount);},0);
       var extraPaid=additional.filter(function(r){return r.paidBy===m.id;}).reduce(function(n,r){return n+c(r.amount);},0);
       var paid=mode==='plan'?planPaid:mode==='extras'?extraPaid:mode==='total'?planPaid+extraPaid:shared.filter(function(r){return r.paidBy===m.id;}).reduce(function(n,r){return n+c(r.amount);},0);
-      var sent=adjusted?transfers.filter(function(t){return t.from===m.id;}).reduce(function(n,r){return n+c(r.amount);},0):0;
-      var received=adjusted?transfers.filter(function(t){return t.to===m.id;}).reduce(function(n,r){return n+c(r.amount);},0):0;
-      var direct=adjusted?expenses.filter(function(r){return r.treatment==='direct';}).reduce(function(n,r){return n+(r.recoverFrom===m.id?c(r.amount):0)-(r.paidBy===m.id?c(r.amount):0);},0):0;
-      return {id:m.id,name:m.name,email:m.email,share:shares[i]/100,paid:paid/100,sent:sent/100,received:received/100,direct:direct/100,gross:(shares[i]-paid)/100,net:(shares[i]-paid-sent+received+direct)/100,planShare:planShares[i]/100,planPaid:planPaid/100,planNet:(planShares[i]-planPaid)/100,extrasShare:extraShares[i]/100,extrasPaid:extraPaid/100,extrasNet:(extraShares[i]-extraPaid)/100};
+      var scopes=repayments.members.get(m.id)||{};
+      var plan=scopes.plan||empty,extras=scopes.extras||empty,totalOnly=scopes.total||empty;
+      var applied=mode==='plan'?plan:mode==='extras'?extras:{
+        sent:plan.sent+extras.sent+totalOnly.sent,
+        received:plan.received+extras.received+totalOnly.received,
+        direct:plan.direct+extras.direct+totalOnly.direct
+      };
+      var gross=shares[i]-paid,adjustment=repaymentDelta(applied);
+      var planAdjustment=repaymentDelta(plan),extrasAdjustment=repaymentDelta(extras);
+      return {
+        id:m.id,name:m.name,email:m.email,share:shares[i]/100,paid:paid/100,
+        sent:applied.sent/100,received:applied.received/100,direct:applied.direct/100,
+        gross:gross/100,adjustment:adjustment/100,net:(gross+adjustment)/100,
+        planShare:planShares[i]/100,planPaid:planPaid/100,planAdjustment:planAdjustment/100,
+        planNet:(planShares[i]-planPaid+planAdjustment)/100,
+        extrasShare:extraShares[i]/100,extrasPaid:extraPaid/100,extrasAdjustment:extrasAdjustment/100,
+        extrasNet:(extraShares[i]-extraPaid+extrasAdjustment)/100,
+        totalOnlyAdjustment:repaymentDelta(totalOnly)/100
+      };
     });
     var netCents=lines.reduce(function(n,p){return n+c(p.net);},0);
     if(netCents){stats.split={valid:false,reason:'Balances do not reconcile. Review references and transfer data.'};return stats;}
     var head=state.members.find(function(m){return m.id===state.settings.headId;});
     var suggestions=lines.filter(function(p){return p.id!==state.settings.headId&&c(p.net)!==0;}).map(function(p){return {from:p.net>0?p.id:state.settings.headId,to:p.net>0?state.settings.headId:p.id,amount:Math.abs(p.net)};});
-    stats.split={valid:true,total:totalCents/100,lines:lines,suggestions:suggestions,head:head,mode:mode,adjusted:adjusted};return stats;
+    stats.split={valid:true,total:totalCents/100,lines:lines,suggestions:suggestions,head:head,mode:mode,hasTotalOnly:repayments.hasTotalOnly};return stats;
   }
   function allocate(total,weights){
     var weightSum=weights.reduce(function(a,b){return a+b;},0);
@@ -303,7 +497,7 @@ var GharDomain = (function () {
     expenses.forEach(function(e){if(e.recoverName&&e.treatment==='direct'&&members.indexOf(e.recoverName)<0)unmapped.push(e.sourceRow+' direct member '+e.recoverName);});
     return {members:members,budgets:budgets,expenses:expenses,electricity:legacyElectricity(sheets),unmapped:unmapped,startMonth:budgets.concat(expenses).map(function(r){return r.month;}).sort()[0]||''};
   }
-  return {VERSION:VERSION,categories:categories,types:types,tables:tables,fail:fail,text:text,email:email,month:month,date:date,money:money,required:required,active:active,validate:validate,report:report,issues:issues,sum:sum,cents:c,legacy:legacy,legacyPeriod:legacyPeriod,allocate:allocate,yes:yes,electricityInput:electricityInput,electricityReport:electricityReport,legacyElectricity:legacyElectricity,readingTime:readingTime,readingLocal:readingLocal,legacyReadingTime:legacyReadingTime};
+  return {VERSION:VERSION,categories:categories,types:types,tables:tables,fail:fail,text:text,email:email,month:month,date:date,money:money,required:required,active:active,validate:validate,report:report,issues:issues,sum:sum,cents:c,repaymentInfo:repaymentInfo,repaymentValue:repaymentValue,legacy:legacy,legacyPeriod:legacyPeriod,allocate:allocate,yes:yes,electricityInput:electricityInput,electricityReport:electricityReport,legacyElectricity:legacyElectricity,readingTime:readingTime,readingLocal:readingLocal,legacyReadingTime:legacyReadingTime};
 })();
 </script><script>/* Explicit local demo adapter. The deployed Google app never uses this store. */
 var GharDemo=(function(){
@@ -523,12 +717,74 @@ var GharHistoryUI=(function(){
   function report(){return D.report(S.db,S.month,S.splitMode);}
   function syncState(state){S.db=state;S.error='';if(!S.month)S.month=today().slice(0,7);if(!navs.some(function(n){return n[0]===S.view;}))S.view='overview';render();}
   async function mutate(action,args,message){var r=await rpc(action,args);S.db=r.state;S.error='';settingsDirty=false;closeModal();render();toast(r.warnings&&r.warnings.length?r.warnings.join(' '):message||'Saved to '+(S.demo?'the local demo':'Google Sheets')+'.');}
-  async function refresh(quiet){if(S.busy||S.saving||!S.db||$('modal-root').children.length||S.view==='setup'||settingsDirty||(quiet&&document.activeElement&&/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)))return;S.busy=true;try{var db=await rpc('state');S.db=db;S.error='';render();if(!quiet)toast(S.demo?'Demo refreshed.':'Latest sheet changes loaded.');}catch(e){S.error=e.message;render();if(!quiet)toast(e.message);}finally{S.busy=false;}}
+  async function refresh(quiet){
+    if(S.busy||S.saving||!S.db||$('modal-root').children.length||S.view==='setup'||settingsDirty||
+       (quiet&&document.activeElement&&/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)))return;
+    var previous=S.db;
+    S.busy=true;
+    try{
+      var db=await rpc('state');
+      if(S.db!==previous)return;
+      S.db=db;
+      S.error='';
+      render();
+      if(!quiet)toast(S.demo?'Demo refreshed.':'Latest sheet changes loaded.');
+    }catch(e){
+      if(S.db!==previous)return;
+      S.error=e.message;
+      render();
+      if(!quiet)toast(e.message);
+    }finally{S.busy=false;}
+  }
   function startPoll(){clearInterval(poll);poll=setInterval(function(){if(!document.hidden&&S.db&&!$('modal-root').children.length)refresh(true);},30000);}
-  async function start(demo){S.demo=!!demo;try{S.boot=await rpc('bootstrap');if((live||remote)&&GHAR_JOIN_ID){try{syncState(await rpc('connect',{sheet:GHAR_JOIN_ID}));startPoll();return;}catch(e){S.error=e.message;}}if(S.boot.activeId){try{syncState(await rpc('state'));startPoll();return;}catch(e){S.error=e.message;}}renderOnboarding();startPoll();}catch(e){$('app').innerHTML='<div class="loading"><span class="brand-symbol">g.</span><h1>Google sign-in needs attention.</h1><p>'+esc(e.message)+'</p>'+button('reload','Try again','refresh')+'</div>';}}
+  async function start(demo,verifiedBoot){
+    S.demo=!!demo;
+    S.error='';
+    try{
+      S.boot=verifiedBoot||await rpc('bootstrap');
+      if((live||remote)&&GHAR_JOIN_ID){
+        try{syncState(await rpc('connect',{sheet:GHAR_JOIN_ID}));startPoll();return;}
+        catch(e){if(e.code==='AUTH_REQUIRED')throw e;S.error=e.message;}
+      }
+      if(S.boot.activeId){
+        try{syncState(await rpc('state'));startPoll();return;}
+        catch(e){if(e.code==='AUTH_REQUIRED')throw e;S.error=e.message;}
+      }
+      renderOnboarding();
+      startPoll();
+    }catch(e){
+      if(remote&&!S.demo){S.db=null;S.boot=null;S.error=e.message;landing();return;}
+      $('app').innerHTML='<div class="loading"><span class="brand-symbol">g.</span><h1>Google sign-in needs attention.</h1><p>'+esc(e.message)+'</p>'+button('reload','Try again','refresh')+'</div>';
+    }
+  }
+  async function signIn(chooseAccount,reauthorize){
+    var remember=$('remember-device');
+    await remote.authorize({chooseAccount:chooseAccount,remember:remember?remember.checked:undefined});
+    if(reauthorize&&S.db){
+      var boot=await rpc('bootstrap');
+      if(boot.profile.email===S.db.profile.email){
+        S.boot=boot;
+        S.error='';
+        toast('Google connected. Retry your save when ready.');
+      }else{
+        closeModal();
+        S.db=null;
+        settingsDirty=false;
+        await start(false,boot);
+      }
+    }else await start(false);
+    if(remote.rememberedDevice()&&!remote.persistenceAvailable())toast('This browser could not remember the device. Google sign-in works for this session.');
+  }
+  function rememberControls(){
+    if(!remote||!remote.configured())return '';
+    var saved=remote.rememberedDevice();
+    return '<div class="device-memory"><label class="checkbox"><input id="remember-device" type="checkbox" '+(saved?'checked':'')+
+      '> Remember this device for up to 90 days</label><p class="sub">Ghar tries to reopen automatically. If Google needs you to reconnect, tap Continue with Google.</p>'+
+      (saved?'<div class="sub remembered-account">Remembered account '+esc(saved.email)+'<br><button class="text-button" data-action="remote-switch-account">Use another Google account</button></div>':'')+'</div>';
+  }
   function brand(){return '<div class="brand"><span class="brand-symbol">g.</span><div><div class="brand-name">Ghar.</div><div class="brand-sub">Your family space</div></div></div>';}
-  function landing(){S.view='landing';window.scrollTo({top:0,behavior:'instant'});$('app').innerHTML='<div class="landing"><header class="landing-nav">'+brand()+'<span class="tag">GOOGLE SHEETS EDITION · 2.5</span></header><main class="landing-main" id="main"><section class="landing-copy"><div class="eyebrow">A LITTLE MORE CLARITY AT HOME</div><h1>One family.<br>One shared<br><em>money picture.</em></h1><p>Plan the month, add everyday expenses and see everyone’s share. Your family’s data stays in its own Google Sheet.</p><div class="landing-buttons">'+(remote?button(remote.configured()?'remote-sign-in':'mobile-setup',remote.configured()?'Continue with Google':'Set up Google connection','lock','primary'):button('launch','Open Google app','external','primary'))+button('demo','Explore the demo','arrow')+(remote?button('phone-install','Install on your phone','download','soft'):'')+'</div><p class="sub">'+(remote?'Install Ghar from this link on Android or iPhone. The owner completes the Google connection once; family members then sign in with their own accounts.':'The demo uses sample data on this device. Google sign-in and live sheets work in the Google-hosted app after the one-time installation.')+'</p><button class="text-button spaced" data-action="'+(remote?'mobile-setup':'install')+'">Installation guide '+icon('arrow')+'</button></section><section class="landing-art" aria-label="Illustrative sample budget"><div class="art-head"><span class="brand-symbol">g.</span><span>Your month, together</span></div><div class="art-purple"><p>SAMPLE MONTHLY PLAN</p><strong>₹30,000.00</strong><div class="art-line"></div></div><div class="art-row">'+avatar('Groceries')+'<span>Groceries</span><strong>Added to the sheet</strong></div><div class="art-row">'+avatar('Family',1)+'<span>Family contributions</span><strong>Everyone included</strong></div><div class="art-row">'+avatar('Home',2)+'<span>Your Google Sheet</span><strong>Always yours</strong></div><div class="floating-label">'+icon('check')+' A clearer month for everyone</div></section></main><section class="landing-features"><div class="landing-feature">'+icon('sheet')+'<h3>Your sheet is the database</h3><p>Create a new one or connect an existing sheet. Direct changes appear when the app refreshes.</p></div><div class="landing-feature">'+icon('users')+'<h3>A family that fits yours</h3><p>Choose your members and head of family. Add members and update access later.</p></div><div class="landing-feature">'+icon('receipt')+'<h3>Everyday updates, in the UI</h3><p>Add and edit expenses, plan budgets and record transfers from a phone or computer.</p></div></section></div>';}
-  function renderOnboarding(){S.view='onboarding';$('app').innerHTML='<main class="onboarding" id="main"><header class="onboard-top">'+brand()+'<div class="sub">'+(S.demo?'Local demo · Google is not connected':esc(S.boot.profile.email))+'</div></header><section class="onboard-intro"><div class="eyebrow">WELCOME TO YOUR FAMILY SPACE</div><h1>Let’s make room for your family.</h1><p>Start a new budget or connect a sheet you already use.</p></section>'+(S.error?notice(S.error,'error'):'')+(S.demo?notice('Demo mode. All changes stay in this browser; no Google Sheet or sharing permission is changed.','warn'):'')+'<div class="choice-grid"><button class="choice" data-action="new-family"><span class="choice-icon">'+icon('plus')+'</span><h2>Create a family</h2><p>Choose your members. Ghar creates and prepares a new sheet in your Google account.</p><span class="text-button">Start with a new sheet '+icon('arrow')+'</span></button><button class="choice" data-action="connect"><span class="choice-icon">'+icon('link')+'</span><h2>Connect an existing sheet</h2><p>Join an existing Ghar family, or set up a spreadsheet you already own.</p><span class="text-button">Connect a sheet '+icon('arrow')+'</span></button></div>'+(S.demo?'<div style="text-align:center">'+button('sample','Load a sample dashboard','grid','soft')+'</div>':'')+(S.boot.connections.length?'<section class="card section"><h2>Recent families</h2>'+S.boot.connections.map(function(c){return '<div class="member-row"><span class="recent-box">'+icon('sheet')+'</span><div><h3>'+esc(c.familyName||c.title)+'</h3><p class="sub">'+esc(c.title)+'</p></div><button class="button tiny" style="margin-left:auto" data-connect="'+esc(c.id)+'">Open</button></div>';}).join('')+'</section>':'')+'<p class="sub" style="text-align:center;margin-top:28px">'+(S.demo?'<button class="text-button" data-action="landing">Back to welcome</button>':'Google sign-in is provided by the web app. Use a separate browser profile if you need a different Google account.')+'</p></main>';}
+  function landing(){S.view='landing';window.scrollTo({top:0,behavior:'instant'});$('app').innerHTML='<div class="landing"><header class="landing-nav">'+brand()+'<span class="tag">GOOGLE SHEETS EDITION · 2.7</span></header><main class="landing-main" id="main"><section class="landing-copy"><div class="eyebrow">A LITTLE MORE CLARITY AT HOME</div><h1>One family.<br>One shared<br><em>money picture.</em></h1><p>Plan the month, add everyday expenses and see everyone’s share. Your family’s data stays in its own Google Sheet.</p>'+(S.error?notice(S.error,'error'):'')+'<div class="landing-buttons">'+(remote?button(remote.configured()?'remote-sign-in':'mobile-setup',remote.configured()?'Continue with Google':'Set up Google connection','lock','primary'):button('launch','Open Google app','external','primary'))+button('demo','Explore the demo','arrow')+(remote?button('phone-install','Install on your phone','download','soft'):'')+'</div>'+rememberControls()+'<p class="sub">'+(remote?'Install Ghar from this link on Android or iPhone. The owner completes the Google connection once; family members then sign in with their own accounts.':'The demo uses sample data on this device. Google sign-in and live sheets work in the Google-hosted app after the one-time installation.')+'</p><button class="text-button spaced" data-action="'+(remote?'mobile-setup':'install')+'">Installation guide '+icon('arrow')+'</button></section><section class="landing-art" aria-label="Illustrative sample budget"><div class="art-head"><span class="brand-symbol">g.</span><span>Your month, together</span></div><div class="art-purple"><p>SAMPLE MONTHLY PLAN</p><strong>₹30,000.00</strong><div class="art-line"></div></div><div class="art-row">'+avatar('Groceries')+'<span>Groceries</span><strong>Added to the sheet</strong></div><div class="art-row">'+avatar('Family',1)+'<span>Family contributions</span><strong>Everyone included</strong></div><div class="art-row">'+avatar('Home',2)+'<span>Your Google Sheet</span><strong>Always yours</strong></div><div class="floating-label">'+icon('check')+' A clearer month for everyone</div></section></main><section class="landing-features"><div class="landing-feature">'+icon('sheet')+'<h3>Your sheet is the database</h3><p>Create a new one or connect an existing sheet. Direct changes appear when the app refreshes.</p></div><div class="landing-feature">'+icon('users')+'<h3>A family that fits yours</h3><p>Choose your members and head of family. Add members and update access later.</p></div><div class="landing-feature">'+icon('receipt')+'<h3>Everyday updates, in the UI</h3><p>Add and edit expenses, plan budgets and record transfers from a phone or computer.</p></div></section></div>';}
+  function renderOnboarding(){S.view='onboarding';$('app').innerHTML='<main class="onboarding" id="main"><header class="onboard-top">'+brand()+'<div class="sub">'+(S.demo?'Local demo · Google is not connected':esc(S.boot.profile.email))+'</div></header><section class="onboard-intro"><div class="eyebrow">WELCOME TO YOUR FAMILY SPACE</div><h1>Let’s make room for your family.</h1><p>Start a new budget or connect a sheet you already use.</p></section>'+(S.error?notice(S.error,'error'):'')+(S.demo?notice('Demo mode. All changes stay in this browser; no Google Sheet or sharing permission is changed.','warn'):'')+'<div class="choice-grid"><button class="choice" data-action="new-family"><span class="choice-icon">'+icon('plus')+'</span><h2>Create a family</h2><p>Choose your members. Ghar creates and prepares a new sheet in your Google account.</p><span class="text-button">Start with a new sheet '+icon('arrow')+'</span></button><button class="choice" data-action="connect"><span class="choice-icon">'+icon('link')+'</span><h2>Connect an existing sheet</h2><p>Join an existing Ghar family, or set up a spreadsheet you already own.</p><span class="text-button">Connect a sheet '+icon('arrow')+'</span></button></div>'+(S.demo?'<div style="text-align:center">'+button('sample','Load a sample dashboard','grid','soft')+'</div>':'')+(S.boot.connections.length?'<section class="card section"><h2>Recent families</h2>'+S.boot.connections.map(function(c){return '<div class="member-row"><span class="recent-box">'+icon('sheet')+'</span><div><h3>'+esc(c.familyName||c.title)+'</h3><p class="sub">'+esc(c.title)+'</p></div><button class="button tiny" style="margin-left:auto" data-connect="'+esc(c.id)+'">Open</button></div>';}).join('')+'</section>':'')+'<p class="sub" style="text-align:center;margin-top:28px">'+(S.demo?'<button class="text-button" data-action="landing">Back to welcome</button>':remote?'<button class="text-button" data-action="remote-switch-account">Switch Google account</button> · <button class="text-button" data-action="remote-sign-out">Sign out</button>':'Google sign-in is provided by the web app.')+'</p></main>';}
   function setupDraft(existing){var names=existing&&existing.legacy&&existing.legacy.memberNames||[];S.draft={nonce:typeof crypto.randomUUID==='function'?crypto.randomUUID():String(Date.now()),familyName:existing?existing.title:'Our Family',startMonth:existing&&existing.legacy.startMonth||today().slice(0,7),sheetId:existing&&existing.id||'',legacy:existing&&existing.legacy||null,importLegacy:!!names.length,headIndex:0,grantAccess:true,members:(names.length?names:['You','Member 2','Member 3','Member 4','Member 5']).map(function(n,i){return {name:n,email:i===0?S.boot.profile.email:''};})};S.setupStep=1;renderSetup();}
   function captureSetup(){if(!S.draft)return;var f=$('setup-form');if(!f)return;var v=new FormData(f),d=S.draft;if(v.has('familyName'))d.familyName=String(v.get('familyName'));if(v.has('startMonth'))d.startMonth=String(v.get('startMonth'));if(v.has('headIndex'))d.headIndex=+v.get('headIndex');d.members.forEach(function(m,i){if(v.has('memberName'+i))m.name=String(v.get('memberName'+i));if(v.has('memberEmail'+i))m.email=String(v.get('memberEmail'+i));});if($('import-legacy'))d.importLegacy=$('import-legacy').checked;if($('grant-setup'))d.grantAccess=$('grant-setup').checked;}
   function renderSetup(){S.view='setup';var d=S.draft;var step=S.setupStep,body='';
@@ -536,7 +792,7 @@ var GharHistoryUI=(function(){
     if(step===2)body=notice('Select the head of family. That person is the Google account setting up this space. Other members can sign in using their own listed Google emails once sheet access is granted.')+'<div class="setup-member-head"><span>#</span><span>Name</span><span class="email-label">Google email (optional for other members)</span><span>Head</span></div>'+d.members.map(function(m,i){return '<div class="member-setup"><span class="member-number">'+(i+1)+'</span><input aria-label="Member '+(i+1)+' name" name="memberName'+i+'" value="'+esc(m.name)+'" required maxlength="100"><input class="email-field" aria-label="Member '+(i+1)+' Google email" name="memberEmail'+i+'" type="email" value="'+esc(i===d.headIndex?S.boot.profile.email:m.email===S.boot.profile.email?'':m.email)+'" '+(i===d.headIndex?'readonly':'')+' placeholder="name@gmail.com"><label class="head-cell"><input type="radio" name="headIndex" aria-label="Make member '+(i+1)+' head" value="'+i+'" '+(i===d.headIndex?'checked':'')+'></label></div>';}).join('');
     if(step===3)body='<div class="summary-list"><div><span>Family</span><strong>'+esc(d.familyName)+'</strong></div><div><span>Members</span><strong>'+d.members.length+'</strong></div><div><span>Head</span><strong>'+esc(d.members[d.headIndex].name)+'</strong></div><div><span>Database</span><strong>'+(d.sheetId?'Connect existing Google Sheet':'Create a new Google Sheet')+'</strong></div><div><span>First month</span><strong>'+labelMonth(d.startMonth)+'</strong></div><div><span>Legacy import</span><strong>'+(d.importLegacy?'Import once into new tables':'No import')+'</strong></div></div><label class="checkbox section"><input id="grant-setup" type="checkbox" '+(d.grantAccess?'checked':'')+'>Grant listed family Google accounts edit access to this sheet. Google may send sharing notifications.</label>'+notice(S.demo?'This is a demo setup. No Google file will be created.':'The new sheet will be created in your signed-in Google account. All later entries and updates are made from this app.');
     $('app').innerHTML='<main class="onboarding" id="main"><header class="onboard-top">'+brand()+'<div class="sub">'+esc(S.boot.profile.email)+(S.demo?' · Demo':'')+'</div></header><section class="onboard-intro"><div class="eyebrow">A SPACE OF YOUR OWN</div><h1>Set up your family.</h1></section><div class="steps">'+['The basics','Your people','Ready to go'].map(function(t,i){return '<span class="'+(step===i+1?'active':'')+'"><b>'+(i+1)+'</b>'+t+'</span>';}).join('')+'</div><section class="card setup-card"><h2 class="setup-title">'+['','Tell us about home','Who’s sharing the month?','Your family is ready'][step]+'</h2><p class="sub" style="margin-bottom:22px">'+['','Create the structure once. You can update it later.','Names stay editable. Google emails control app membership.','Review the details before creating your database.'][step]+'</p><form id="setup-form">'+body+'<div id="setup-error"></div><div class="form-actions">'+button(step===1?'cancel-setup':'setup-back',step===1?'Cancel':'Back')+'<button class="button primary" type="submit">'+(step===3?(S.demo?'Create demo family':d.sheetId?'Set up this sheet':'Create family & sheet'):'Continue')+icon('arrow')+'</button></div></form></section></main>';}
-  function render(){if(!S.db)return renderOnboarding();if(S.view==='setup')return renderSetup();var db=S.db,title=navs.find(function(n){return n[0]===S.view;})[2],me=db.members.find(function(m){return m.id===db.meId;});var views={overview:overview,expenses:expensesView,budgets:budgetView,family:familyView,transfers:transferView,electricity:E.view,history:H.main,settings:settingsView};$('app').innerHTML='<aside class="sidebar">'+brand()+'<div class="nav-label">YOUR HOUSEHOLD</div><nav class="nav" aria-label="Main navigation">'+navs.slice(0,-1).map(nav).join('')+'</nav><div class="nav-secondary"><div class="nav-label">YOUR FAMILY SPACE</div><nav class="nav">'+nav(navs[navs.length-1])+'</nav></div><div class="sidebar-bottom"><div class="home-note">'+icon('heart')+'<h3>'+esc(db.settings.familyName)+'</h3><p>'+db.members.filter(function(m){return D.active(m,today().slice(0,7));}).length+' active members.<br>One shared place for the month.</p></div><div class="profile">'+avatar(me.name)+'<div><strong>'+esc(me.name)+(db.isHead?' · Head':'')+'</strong><small title="'+esc(db.profile.email)+'">'+esc(db.profile.email)+'</small></div></div></div></aside><div class="shell"><header class="topbar"><div class="mobile-brand"><span class="brand-symbol">g.</span>Ghar.</div><div class="breadcrumb">'+esc(db.settings.familyName)+' <span>/</span><strong>'+title+'</strong></div><div class="top-actions"><span class="sync '+(S.demo?'demo':'')+'"><i class="dot"></i>'+(S.demo?'Local demo':'Google Sheet · 30s sync')+'</span>'+(remote&&!S.demo?'<button class="icon-button" data-action="remote-reauthorize" aria-label="Continue with Google">'+icon('lock')+'</button>':'')+'<button class="icon-button" data-action="refresh" aria-label="Refresh sheet">'+icon('refresh')+'</button><button class="icon-button" data-action="share" aria-label="Share family link">'+icon('share')+'</button></div></header><main class="main" id="main" tabindex="-1">'+head()+ '<div class="print-info">'+esc(db.settings.familyName)+' · '+labelMonth(S.month)+' · '+(S.demo?'Demo data':'Google Sheet')+'</div>'+(S.error?notice('Could not refresh: '+S.error+'. Previous data is still displayed.','error'):'')+(S.demo?notice('Demo data is stored on this device. Google sign-in, sheet creation and shared editing are available in the deployed Google app.','warn'):'')+views[S.view]()+ '<footer class="footer"><span>'+(S.demo?'Local demo · No Google Sheet is connected.':'Your Ghar database tabs are live. Direct edits appear on refresh or within 30 seconds.')+'</span><button class="text-button" data-action="help">How it works '+icon('arrow')+'</button></footer></main></div><nav class="mobile-nav" aria-label="Mobile navigation">'+navs.map(function(n){return '<button data-go="'+n[0]+'" class="'+(S.view===n[0]?'active':'')+'" '+(S.view===n[0]?'aria-current="page"':'')+'>'+icon(n[1])+'<span>'+({budgets:'Plan',family:'Family',transfers:'Transfers',electricity:'Power',history:'Logs'}[n[0]]||n[2])+'</span></button>';}).join('')+'</nav>';if(S.view==='expenses')expenseResults();if(S.view==='settings'&&remote){var phoneCard=document.createElement('section');phoneCard.className='card setting-card section';phoneCard.innerHTML='<h2>Ghar on your phone</h2><p class="sub">Install the app from this link. Internet is required for live family data.</p><div class="connection-actions">'+button('phone-install','Install app','download')+button('phone-update','Check app update','refresh')+(!S.demo?button('remote-reauthorize','Continue with Google','lock')+button('remote-sign-out','Sign out on this device','close'):'')+'</div>';document.getElementById('main').insertBefore(phoneCard,document.querySelector('.footer'));}}
+  function render(){if(!S.db)return renderOnboarding();if(S.view==='setup')return renderSetup();var db=S.db,title=navs.find(function(n){return n[0]===S.view;})[2],me=db.members.find(function(m){return m.id===db.meId;});var views={overview:overview,expenses:expensesView,budgets:budgetView,family:familyView,transfers:transferView,electricity:E.view,history:H.main,settings:settingsView};$('app').innerHTML='<aside class="sidebar">'+brand()+'<div class="nav-label">YOUR HOUSEHOLD</div><nav class="nav" aria-label="Main navigation">'+navs.slice(0,-1).map(nav).join('')+'</nav><div class="nav-secondary"><div class="nav-label">YOUR FAMILY SPACE</div><nav class="nav">'+nav(navs[navs.length-1])+'</nav></div><div class="sidebar-bottom"><div class="home-note">'+icon('heart')+'<h3>'+esc(db.settings.familyName)+'</h3><p>'+db.members.filter(function(m){return D.active(m,today().slice(0,7));}).length+' active members.<br>One shared place for the month.</p></div><div class="profile">'+avatar(me.name)+'<div><strong>'+esc(me.name)+(db.isHead?' · Head':'')+'</strong><small title="'+esc(db.profile.email)+'">'+esc(db.profile.email)+'</small></div></div></div></aside><div class="shell"><header class="topbar"><div class="mobile-brand"><span class="brand-symbol">g.</span>Ghar.</div><div class="breadcrumb">'+esc(db.settings.familyName)+' <span>/</span><strong>'+title+'</strong></div><div class="top-actions"><span class="sync '+(S.demo?'demo':'')+'"><i class="dot"></i>'+(S.demo?'Local demo':'Google Sheet · 30s sync')+'</span>'+(remote&&!S.demo?'<button class="icon-button" data-action="remote-reauthorize" aria-label="Continue with Google">'+icon('lock')+'</button>':'')+'<button class="icon-button" data-action="refresh" aria-label="Refresh sheet">'+icon('refresh')+'</button><button class="icon-button" data-action="share" aria-label="Share family link">'+icon('share')+'</button></div></header><main class="main" id="main" tabindex="-1">'+head()+ '<div class="print-info">'+esc(db.settings.familyName)+' · '+labelMonth(S.month)+' · '+(S.demo?'Demo data':'Google Sheet')+'</div>'+(S.error?notice('Could not refresh: '+S.error+'. Previous data is still displayed.','error'):'')+(S.demo?notice('Demo data is stored on this device. Google sign-in, sheet creation and shared editing are available in the deployed Google app.','warn'):'')+views[S.view]()+ '<footer class="footer"><span>'+(S.demo?'Local demo · No Google Sheet is connected.':'Your Ghar database tabs are live. Direct edits appear on refresh or within 30 seconds.')+'</span><button class="text-button" data-action="help">How it works '+icon('arrow')+'</button></footer></main></div><nav class="mobile-nav" aria-label="Mobile navigation">'+navs.map(function(n){return '<button data-go="'+n[0]+'" class="'+(S.view===n[0]?'active':'')+'" '+(S.view===n[0]?'aria-current="page"':'')+'>'+icon(n[1])+'<span>'+({budgets:'Plan',family:'Family',transfers:'Transfers',electricity:'Power',history:'Logs'}[n[0]]||n[2])+'</span></button>';}).join('')+'</nav>';if(S.view==='expenses')expenseResults();if(S.view==='settings'&&remote){var phoneCard=document.createElement('section');phoneCard.className='card setting-card section';phoneCard.innerHTML='<h2>Ghar on your phone</h2><p class="sub">Install the app from this link. Internet is required for live family data.</p><div class="connection-actions">'+button('phone-install','Install app','download')+button('phone-update','Check app update','refresh')+(!S.demo?button('remote-reauthorize','Continue with Google','lock')+button('remote-switch-account','Switch Google account','users')+button('remote-sign-out','Sign out on this device','close'):'')+'</div>';document.getElementById('main').insertBefore(phoneCard,document.querySelector('.footer'));}}
   function nav(n){return '<button data-go="'+n[0]+'" class="'+(S.view===n[0]?'active':'')+'" '+(S.view===n[0]?'aria-current="page"':'')+'>'+icon(n[1])+'<span>'+n[2]+'</span></button>';}
   function head(){if(S.view==='history')return '<section class="page-head"><div><div class="eyebrow">'+esc(S.db.settings.familyName)+'</div><h1>Your family’s history.</h1><p>Review changes and recover deleted entries across all months.</p></div></section>';var titles={overview:[labelMonth(S.month).split(' ')[0]+', at a glance.','A clear view of your plan, spending and family contributions.'],expenses:['Every expense, together.','Add everyday purchases and keep everyone in the picture.'],budgets:['Give the month a plan.','Set a budget and choose who will handle each planned cost.'],family:['Everyone’s share, clearly.','Compare the initial plan, extra contributions and their combined total.'],transfers:['Keep repayments in view.','A transfer updates balances without counting as a new expense.'],electricity:['Electricity, floor by floor.','Calculate your family’s share and keep other households outside the budget.'],settings:['Your family, your settings.','Manage your people, database connection and family preferences.']};var x=titles[S.view];return '<section class="page-head"><div><div class="eyebrow">'+esc(String(S.db.settings.familyName).toUpperCase())+'</div><h1>'+esc(x[0])+'</h1><p>'+esc(x[1])+'</p></div><div class="controls"><label for="month" style="position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)">Select month</label><input class="month-select" id="month" type="month" value="'+S.month+'">'+button(S.view==='budgets'?'add-budget':S.view==='transfers'?'add-transfer':S.view==='electricity'?'add-electricity':'add-expense',S.view==='budgets'?'Add plan item':S.view==='transfers'?'Record transfer':S.view==='electricity'?'Add split':'Add expense','plus','primary')+'</div></section>';}
   function metric(label,value,sub,ico){return '<div class="metric"><div class="metric-label"><span class="metric-icon">'+icon(ico)+'</span>'+label+'</div><div class="metric-value num">'+money(value)+'</div><p class="sub">'+sub+'</p></div>';}
@@ -548,20 +804,71 @@ var GharHistoryUI=(function(){
   function tag(t){return '<span class="tag '+esc(t)+'">'+({covered:'Covered by plan',additional:'Additional',personal:'Personal',direct:'Direct repayment',owner:'Owner recovery'})[t]+'</span>';}
   function filteredExpenses(){return S.db.expenses.filter(function(e){return !e.deletedAt&&e.month===S.month&&(S.payer==='all'||e.paidBy===S.payer)&&(S.type==='all'||e.treatment===S.type)&&(!S.search||[e.description,e.category,memberName(e.paidBy)].join(' ').toLowerCase().includes(S.search.toLowerCase()));}).sort(function(a,b){return (b.date||'').localeCompare(a.date||'')||b.updatedAt.localeCompare(a.updatedAt);});}
   function expensesView(){var r=report();return issuesNotice(r)+stats([['Recorded shared spending',money(r.actual),'Covered purchases + additional shared expenses'],['Covered by plan',money(r.covered),'Part of recorded spending, counted once'],['Additional shared expenses',money(r.additional),'Outside the initial plan']])+'<section class="card"><div class="filters"><label class="search">'+icon('search')+'<input id="expense-search" type="search" aria-label="Search expenses" placeholder="Search a purchase or category…" value="'+esc(S.search)+'"></label><select class="filter-select" id="payer-filter" aria-label="Filter by payer"><option value="all">Everyone</option>'+S.db.members.map(function(m){return '<option value="'+m.id+'" '+(S.payer===m.id?'selected':'')+'>'+esc(m.name)+'</option>';}).join('')+'</select><select class="filter-select" id="type-filter" aria-label="Filter by treatment"><option value="all">All types</option>'+D.types.map(function(t){return '<option value="'+t+'" '+(S.type===t?'selected':'')+'>'+({covered:'Covered by plan',additional:'Additional',personal:'Personal',direct:'Direct repayment',owner:'Owner recovery'})[t]+'</option>';}).join('')+'</select>'+button('csv-expenses','CSV','download','tiny')+'</div><div id="expense-results"></div></section>';}
-  function expenseResults(){var rows=filteredExpenses();$('expense-results').innerHTML='<div class="table-meta"><span>'+rows.length+' matching entries</span><span class="num">Filtered total '+money(D.sum(rows))+'</span></div>'+(rows.length?'<div class="table-wrap"><table class="data-table"><thead><tr><th>Date</th><th>Purchase</th><th>Paid by</th><th>Type</th><th class="num">Amount</th><th></th></tr></thead><tbody>'+rows.map(function(e){return '<tr><td style="white-space:nowrap">'+dateLabel(e.date)+'</td><td class="description">'+esc(e.description)+'<span class="detail">'+esc(e.category)+(e.treatment==='direct'?' · Repay from '+esc(memberName(e.recoverFrom)):'')+'</span></td><td>'+person(e.paidBy)+'</td><td>'+tag(e.treatment)+'</td><td class="num">'+money(e.amount)+'</td><td><div class="row-actions"><button class="button tiny" data-edit="Expenses" data-id="'+e.id+'" aria-label="Edit '+esc(e.description)+'">'+icon('edit')+'</button></div></td></tr>';}).join('')+'</tbody></table></div>':empty('No purchases in this view.','Add an expense or adjust the filters.',button('add-expense','Add expense','plus','soft')));}
+  function expenseResults(){var rows=filteredExpenses();$('expense-results').innerHTML='<div class="table-meta"><span>'+rows.length+' matching entries</span><span class="num">Filtered total '+money(D.sum(rows))+'</span></div>'+(rows.length?'<div class="table-wrap"><table class="data-table"><thead><tr><th>Date</th><th>Purchase</th><th>Paid by</th><th>Type</th><th class="num">Amount</th><th></th></tr></thead><tbody>'+rows.map(function(e){var repayment=expenseRepayment(e);return '<tr><td style="white-space:nowrap">'+dateLabel(e.date)+'</td><td class="description">'+esc(repayment.text)+'<span class="detail">'+esc(e.category)+(e.treatment==='direct'?' · Repay from '+esc(memberName(e.recoverFrom))+' · '+storedRepaymentLabel(repayment.split):'')+'</span></td><td>'+person(e.paidBy)+'</td><td>'+tag(e.treatment)+'</td><td class="num">'+money(e.amount)+'</td><td><div class="row-actions"><button class="button tiny" data-edit="Expenses" data-id="'+e.id+'" aria-label="Edit '+esc(repayment.text)+'">'+icon('edit')+'</button></div></td></tr>';}).join('')+'</tbody></table></div>':empty('No purchases in this view.','Add an expense or adjust the filters.',button('add-expense','Add expense','plus','soft')));}
   function budgetView(){var r=report();return issuesNotice(r)+stats([['Initial monthly plan',money(r.planned),r.budgets.length+' budget items'],['Recorded spending',money(r.actual),'Log each paid bill as an expense'],['Plan + additional expenses',money(r.expected),'A forecast, separate from actual payments']])+'<section class="card"><div class="card-head"><div><h2>The plan for '+labelMonth(S.month)+'</h2><p>Assigned amounts are expected costs, not proof of payment.</p></div><div class="row">'+button('copy-budget','Copy a month','copy','tiny')+button('csv-budgets','CSV','download','tiny')+'</div></div>'+(r.budgets.length?'<div class="table-wrap"><table class="data-table"><thead><tr><th>Budget item</th><th>Assigned to</th><th class="num">Planned</th><th class="num">Linked purchases</th><th></th></tr></thead><tbody>'+r.budgets.map(function(b){var spent=r.expenses.filter(function(e){return e.budgetId===b.id&&e.treatment==='covered';});return '<tr><td class="description">'+esc(b.description)+'<span class="detail">'+esc(b.category)+'</span></td><td>'+person(b.assignedTo)+'</td><td class="num">'+money(b.amount)+'</td><td class="num">'+money(D.sum(spent))+'</td><td><div class="row-actions"><button class="button tiny" data-edit="Budgets" data-id="'+b.id+'" aria-label="Edit '+esc(b.description)+'">'+icon('edit')+'</button><button class="button tiny" data-pay-budget="'+b.id+'">Log payment</button></div></td></tr>';}).join('')+'</tbody><tfoot><tr><td colspan="2">Planned total</td><td class="num">'+money(r.planned)+'</td><td></td><td></td></tr></tfoot></table></div>':empty('Start with the costs you expect.','Add rent, groceries, bills and any other plan items.',button('add-budget','Add a plan item','plus','soft')))+'</section>';}
   function balance(n){return '<strong class="num '+(n<0?'negative':'positive')+'">'+money(Math.abs(n))+'</strong><span class="detail">'+(n>0?'To contribute':n<0?'To receive':'Balanced')+'</span>';}
   function familyView(){
-    var r=report(),split=r.split,total=S.splitMode==='total',label={plan:'Plan',extras:'Extras',total:'Total'}[S.splitMode];
-    var cards=[['plan','Plan',r.planned,'Initial monthly plan'],['extras','Extras',r.additional,'Additional contributions outside home expenses'],['total','Total',r.expected,'Plan + Extras']];
-    var html=issuesNotice(r)+'<div class="split-options" role="group" aria-label="Split overview">'+cards.map(function(c){return '<button class="split-option '+(S.splitMode===c[0]?'active':'')+'" data-basis="'+c[0]+'" aria-pressed="'+(S.splitMode===c[0])+'"><span>'+c[1]+'</span><strong class="num">'+money(c[2])+'</strong><small>'+c[3]+'</small></button>';}).join('')+'</div><div class="spread section split-toolbar"><h2>'+label+' split · '+labelMonth(S.month)+'</h2><div class="row">'+button('record-split-payment','Record Payment','swap','tiny')+button('copy-split','Copy summary','copy','tiny')+button('csv-family','Export split','download','tiny')+'</div></div>';
-    html+=notice(S.splitMode==='plan'?'Plan divides the initial monthly budget and credits the member assigned to each planned cost. Assigned amounts are expected contributions, not proof of payment.':S.splitMode==='extras'?'Extras divides only additional shared expenses and credits their payers. Imported rows with “Included in Home Exp” unchecked belong here. Covered purchases, personal costs and owner recoveries stay outside Extras.':'Total combines Plan and Extras. Recorded transfers and direct repayments are applied once here to show each member’s remaining balance. Covered purchases do not add a second credit.');
+    var r=report(),split=r.split,total=S.splitMode==='total',plan=S.splitMode==='plan';
+    var label=repaymentLabel(S.splitMode);
+    var cards=[['plan','Plan',r.planned,'Initial monthly plan'],['extras','Extras',r.additional,'Additional shared expenses'],['total','Total',r.expected,'Plan + Extras']];
+    var html=issuesNotice(r)+'<div class="split-options" role="group" aria-label="Split overview">'+cards.map(function(c){
+      return '<button class="split-option '+(S.splitMode===c[0]?'active':'')+'" data-basis="'+c[0]+'" aria-pressed="'+(S.splitMode===c[0])+
+        '"><span>'+c[1]+'</span><strong class="num">'+money(c[2])+'</strong><small>'+c[3]+'</small></button>';
+    }).join('')+'</div><div class="spread section split-toolbar"><h2>'+label+' split · '+labelMonth(S.month)+'</h2><div class="row">'+
+      button('record-split-payment','Record Payment','swap','tiny')+button('copy-split','Copy summary','copy','tiny')+
+      button('csv-family','Export split','download','tiny')+'</div></div>';
+    html+=notice(plan?'Plan uses initial budget shares and assigned contributions. The remaining balance includes payments applied to Plan.':
+      total?'Total adds the remaining Plan and Extras balances, plus any older repayments assigned to Total only.':
+      'Extras uses additional shared expenses and credits their payers. The remaining balance includes payments applied to Extras.');
     if(!split.valid)return html+notice(split.reason,'warn');
-    html+='<section class="card section"><div class="card-head"><div><h2>'+(total?'Plan, Extras and remaining Total':'How '+label.toLowerCase()+' is shared')+'</h2><p>'+(total?'Combined = Plan balance + Extras balance. Remaining = Combined − sent + received + direct.':'Share − '+(S.splitMode==='plan'?'assigned plan amount':'extra amount paid')+' = balance before repayments.')+'</p></div></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Member</th>'+(total?'<th class="num">Plan balance</th><th class="num">Extras balance</th><th class="num">Combined</th><th class="num">Repayment adjustment</th><th class="num">Remaining Total</th>':'<th class="num">Share</th><th class="num">'+(S.splitMode==='plan'?'Assigned plan':'Extras contributed')+'</th><th class="num">Balance</th>')+'</tr></thead><tbody>'+split.lines.map(function(p){return '<tr><td>'+person(p.id)+'</td>'+(total?'<td>'+balance(p.planNet)+'</td><td>'+balance(p.extrasNet)+'</td><td>'+balance(p.gross)+'</td><td class="num">'+money((D.cents(p.direct)-D.cents(p.sent)+D.cents(p.received))/100)+'<span class="detail">Sent '+money(p.sent)+' · Received '+money(p.received)+'<br>Direct '+money(p.direct)+'</span></td><td>'+balance(p.net)+'</td>':'<td class="num">'+money(p.share)+'</td><td class="num">'+money(p.paid)+'</td><td>'+balance(p.net)+'</td>')+'</tr>';}).join('')+'</tbody></table></div><p class="chart-note">Active membership dates and weights come from Settings. Plan and Extras are rounded separately to paise, then added per member. Their balances remain unchanged when you record a repayment.</p></section>';
-    if(!total)return html+'<div class="section">'+notice('Use Record Payment on this page to log a repayment. It adjusts Total once; the Plan and Extras overviews keep their original allocation.')+'<button class="button soft" data-basis="total">View remaining Total '+icon('arrow')+'</button></div>';
-    return html+'<section class="card section"><div class="card-head"><div><h2>Suggested next transfers</h2><p>Remaining Total, coordinated through '+esc(split.head.name)+'</p></div></div>'+(split.suggestions.length?'<div class="transfer-grid">'+split.suggestions.map(function(t){return '<div class="transfer-card"><div class="transfer-flow"><span>'+esc(memberName(t.from))+'</span>'+icon('arrow')+'<span>'+esc(memberName(t.to))+'</span></div><div><strong class="num">'+money(t.amount)+'</strong><br><button class="text-button" data-suggest-from="'+t.from+'" data-to="'+t.to+'" data-amount="'+t.amount+'">Record payment</button></div></div>';}).join('')+'</div>':empty('All balances are even.','New plan items, extras and repayments will update this view.'))+'</section>';
+
+    var totalOnly=total&&split.hasTotalOnly;
+    var headings=total?'<th class="num">Plan remaining</th><th class="num">Extras remaining</th>'+
+      (totalOnly?'<th class="num">Total only adjustment</th>':'')+'<th class="num">Remaining Total</th>':
+      '<th class="num">Share</th><th class="num">'+(plan?'Assigned plan':'Extras contributed')+
+      '</th><th class="num">Repayment adjustment</th><th class="num">Remaining</th>';
+    var rows=split.lines.map(function(p){
+      var amounts=total?'<td>'+balance(p.planNet)+'</td><td>'+balance(p.extrasNet)+'</td>'+
+        (totalOnly?'<td class="num">'+money(p.totalOnlyAdjustment)+'</td>':'')+'<td>'+balance(p.net)+'</td>':
+        '<td class="num">'+money(p.share)+'</td><td class="num">'+money(p.paid)+'</td><td class="num">'+money(p.adjustment)+'</td><td>'+balance(p.net)+'</td>';
+      return '<tr><td>'+person(p.id)+'</td>'+amounts+'</tr>';
+    }).join('');
+    html+='<section class="card section"><div class="card-head"><div><h2>'+label+' balances</h2><p>'+
+      (total?'Each repayment is counted once.':'Remaining = share − '+(plan?'assigned amount':'extras paid')+' + repayment adjustment.')+
+      '</p></div></div><div class="table-wrap"><table class="data-table"><thead><tr><th>Member</th>'+headings+
+      '</tr></thead><tbody>'+rows+'</tbody></table></div>'+
+      (totalOnly?'<p class="chart-note">Edit an older payment or direct repayment to assign it to Plan or Extras.</p>':'')+'</section>';
+    if(!total)return html+'<div class="section"><button class="button soft" data-basis="total">View remaining Total '+icon('arrow')+'</button></div>';
+    return html+'<section class="card section"><div class="card-head"><div><h2>Suggested next transfers</h2><p>Remaining Total, coordinated through '+
+      esc(split.head.name)+'</p></div></div>'+(split.suggestions.length?'<div class="transfer-grid">'+split.suggestions.map(function(t){
+        return '<div class="transfer-card"><div class="transfer-flow"><span>'+esc(memberName(t.from))+'</span>'+icon('arrow')+
+          '<span>'+esc(memberName(t.to))+'</span></div><div><strong class="num">'+money(t.amount)+
+          '</strong><br><button class="text-button" data-suggest-from="'+esc(t.from)+'" data-to="'+esc(t.to)+
+          '" data-amount="'+t.amount+'">Record payment</button></div></div>';
+      }).join('')+'</div>':empty('All balances are even.','New plan items, extras and repayments will update this view.'))+'</section>';
   }
-  function transferView(){var rows=report().transfers.sort(function(a,b){return b.date.localeCompare(a.date);});return notice('Record transfers only when money has actually moved. Transfers reduce what a member owes; they do not increase the household’s expenses.')+'<section class="card"><div class="card-head"><div><h2>Family transfers</h2><p>'+labelMonth(S.month)+'</p></div>'+button('csv-transfers','CSV','download','tiny')+'</div>'+(rows.length?'<div class="table-wrap"><table class="data-table"><thead><tr><th>Date</th><th>From</th><th>To</th><th>Note</th><th class="num">Amount</th><th></th></tr></thead><tbody>'+rows.map(function(t){return '<tr><td>'+dateLabel(t.date)+'</td><td>'+person(t.from)+'</td><td>'+person(t.to)+'</td><td>'+esc(t.note)+'</td><td class="num">'+money(t.amount)+'</td><td><button class="button tiny" data-edit="Transfers" data-id="'+t.id+'" aria-label="Edit transfer">'+icon('edit')+'</button></td></tr>';}).join('')+'</tbody></table></div>':empty('No transfers recorded this month.','Add a repayment when a family member has paid another.',button('add-transfer','Record a transfer','swap','soft')))+'</section>';}
+  function repaymentLabel(scope){return {plan:'Plan',extras:'Extras',total:'Total'}[scope];}
+  function storedRepaymentLabel(scope){return scope==='total'?'Total only':repaymentLabel(scope);}
+  function expenseRepayment(expense){
+    return expense.treatment==='direct'?D.repaymentInfo(expense.description):{text:expense.description,split:''};
+  }
+  function transferView(){
+    var rows=report().transfers.sort(function(a,b){return b.date.localeCompare(a.date);});
+    var tableRows=rows.map(function(t){
+      var payment=D.repaymentInfo(t.note);
+      return '<tr><td>'+dateLabel(t.date)+'</td><td>'+person(t.from)+'</td><td>'+person(t.to)+'</td><td>'+
+        storedRepaymentLabel(payment.split)+'</td><td>'+esc(payment.text)+'</td><td class="num">'+money(t.amount)+
+        '</td><td><button class="button tiny" data-edit="Transfers" data-id="'+esc(t.id)+'" aria-label="Edit transfer">'+
+        icon('edit')+'</button></td></tr>';
+    }).join('');
+    return notice('Record a transfer after money has moved. Choose the split whose balance the payment settles.')+
+      '<section class="card"><div class="card-head"><div><h2>Family transfers</h2><p>'+labelMonth(S.month)+
+      '</p></div>'+button('csv-transfers','CSV','download','tiny')+'</div>'+
+      (rows.length?'<div class="table-wrap"><table class="data-table"><thead><tr><th>Date</th><th>From</th><th>To</th>'+
+        '<th>Applies to</th><th>Note</th><th class="num">Amount</th><th></th></tr></thead><tbody>'+tableRows+
+        '</tbody></table></div>':empty('No transfers recorded this month.','Add a repayment when a family member has paid another.',
+        button('add-transfer','Record a transfer','swap','soft')))+'</section>';
+  }
   function settingsView(){var tabs=[['family','users','Family'],['connection','link','Sheet connection'],['trash','trash','Recycle bin'],['activity','clock','Change logs']];var body='';
     if(S.tab==='family')body='<section class="card setting-card"><div class="card-head"><div><h2>Family members</h2><p>'+S.db.members.filter(function(m){return D.active(m,today().slice(0,7));}).length+' active members · '+S.db.members.length+' total records</p></div>'+(S.db.isHead?button('add-member','Add member','plus','tiny'):'')+'</div>'+(!S.db.isHead?notice('Only the head can manage members and family settings. You can add and edit expenses, budgets and transfers.'):'')+'<div class="table-wrap"><table class="data-table"><thead><tr><th>Member</th><th>Google email</th><th>Membership</th><th></th></tr></thead><tbody>'+S.db.members.map(function(m){return '<tr><td>'+person(m.id)+(m.id===S.db.settings.headId?'<span class="detail">Head of family</span>':'')+'</td><td>'+esc(m.email||'No login email yet')+'</td><td><span class="tag '+(D.active(m,today().slice(0,7))?'active':'')+'">'+(D.active(m,today().slice(0,7))?'Active':'Outside active dates')+'</span><span class="detail">'+esc(m.activeFrom)+(m.activeTo?' → '+esc(m.activeTo):' onwards')+'</span></td><td><div class="row-actions">'+(S.db.isHead?'<button class="button tiny" data-edit="Members" data-id="'+m.id+'" aria-label="Edit member '+esc(m.name)+'">'+icon('edit')+'</button>'+(m.email&&m.id!==S.db.meId?'<button class="button tiny" data-access="grant" data-id="'+m.id+'">Grant access</button>':''):'')+'</div></td></tr>';}).join('')+'</tbody></table></div><p class="chart-note">Use membership dates to keep historical shares intact. Member Google emails must be unique. Google Sheets sharing and Ghar membership both control who can use the live app.</p></section><section class="card setting-card"><h2>Family preferences</h2><p class="sub">Changing the head changes in-app administration. It does not transfer ownership of the Google file.</p><form id="family-settings" class="section"><div class="form-grid"><div class="field"><label for="family-name">Family name</label><input id="family-name" name="familyName" value="'+esc(S.db.settings.familyName)+'" required '+(!S.db.isHead?'disabled':'')+'></div><div class="field"><label for="head-id">Head of family</label><select id="head-id" name="headId" '+(!S.db.isHead?'disabled':'')+'>'+S.db.members.filter(function(m){return m.email&&D.active(m,today().slice(0,7));}).map(function(m){return '<option value="'+m.id+'" '+(m.id===S.db.settings.headId?'selected':'')+'>'+esc(m.name)+'</option>';}).join('')+'</select></div><div class="field full"><label for="categories">Expense categories</label><textarea id="categories" name="categories" '+(!S.db.isHead?'disabled':'')+'>'+esc(categories().join('\n'))+'</textarea><small>One category per line. Old entries keep their existing category names.</small></div></div><div id="settings-error"></div>'+(S.db.isHead?'<div class="form-actions"><button type="submit" class="button primary">Save family settings</button></div>':'')+'</form></section>';
     if(S.tab==='connection')body='<section class="card setting-card"><h2>Your connected sheet</h2><p class="sub">The live app reads and writes this database. Direct edits to its Ghar tabs are loaded on refresh or within 30 seconds while the app is visible.</p><div class="connection-box">'+icon('sheet')+'<div><h3>'+esc(S.db.connection.title)+'</h3><p class="sub spaced">'+esc(S.db.connection.id)+'</p><span class="tag spaced">'+(S.demo?'Demo only · no Google connection':'Google Sheets · connected')+'</span></div></div><div class="connection-actions">'+(S.demo?'':'<a class="button" href="'+esc(S.db.connection.url)+'" target="_blank" rel="noopener">'+icon('external')+'Open sheet</a>')+button('connect','Connect another sheet','link')+button('new-family','Create another family','plus')+button('disconnect','Disconnect this sheet','close','danger')+'</div><p class="chart-note">Disconnecting removes this connection for your signed-in account. It does not delete the spreadsheet or disconnect other family members.</p></section><section class="card setting-card"><h2>Data tools</h2><p class="sub">Keep a copy of the database or print the current view. Downloaded JSON is a backup; it is not a second live database.</p><div class="connection-actions">'+button('backup','Download JSON backup','download')+button('print','Print current view','print')+'</div><details><summary>Editing the database directly</summary><p class="sub spaced">Keep tab names, headers, stable IDs and member references intact. Edit amounts as numbers. Dates use YYYY-MM-DD and months use YYYY-MM. Direct edits are logged when Ghar next refreshes. The log records detection time and may not identify the sheet editor. Keep Ghar_Audit, Ghar_LogState and Ghar_RecycleBin intact to preserve history and recovery. Direct sheet editors can change the database, including administrative settings, according to their Google permissions.</p></details></section>'+(S.demo?'<section class="card setting-card"><h2>Demo controls</h2><p class="sub">These controls affect only the sample data stored on this browser.</p><div class="connection-actions">'+button('reset-demo','Reset all demo data','trash','danger')+button('landing','Back to welcome','home')+'</div></section>':'');
@@ -574,37 +881,59 @@ var GharHistoryUI=(function(){
   function field(label,name,value,type,full,extra){return '<div class="field '+(full?'full':'')+'"><label for="form-'+name+'">'+label+'</label><input id="form-'+name+'" name="'+name+'" type="'+(type||'text')+'" value="'+esc(value)+'" '+(extra||'')+'></div>';}
   function select(label,name,opts,value,full,extra){return '<div class="field '+(full?'full':'')+'"><label for="form-'+name+'">'+label+'</label><select id="form-'+name+'" name="'+name+'" '+(extra||'')+'>'+opts.map(function(o){return '<option value="'+esc(o[0])+'" '+(o[0]===value?'selected':'')+'>'+esc(o[1])+'</option>';}).join('')+'</select></div>';}
   function formDate(){return S.month===today().slice(0,7)?today():S.month+'-01';}
+  function repaymentField(kind,scope,legacy){
+    var options=[['','Choose Plan or Extras'],['plan','Plan'],['extras','Extras']];
+    if(legacy)options.push(['total','Total only (existing)']);
+    return '<div class="field full" id="repayment-field"><label for="form-repaymentSplit">Apply '+kind+
+      ' to</label><select id="form-repaymentSplit" name="repaymentSplit" required>'+
+      options.map(function(o){return '<option value="'+o[0]+'" '+(o[0]===scope?'selected':'')+'>'+o[1]+'</option>';}).join('')+
+      '</select></div>';
+  }
   function editRecord(table,id,prefill){var old=id?S.db[table.toLowerCase()].find(function(r){return r.id===id;}):null,v=Object.assign({date:formDate(),month:S.month,category:categories()[0],paidBy:S.db.meId,assignedTo:S.db.meId,treatment:'additional',name:'',email:'',activeFrom:today().slice(0,7),activeTo:'',weight:1,from:S.db.meId,to:S.db.settings.headId},old||{},prefill||{});var options=S.db.members.map(function(m){return [m.id,m.name];}),body='';if(table==='Expenses'){options=[['','Choose a member']].concat(options);if(!options.some(function(o){return o[0]===v.paidBy;}))v.paidBy='';}
-    if(table==='Expenses')body=field('What was it for?','description',v.description||'','text',true,'required maxlength="300"')+field('Date','date',v.date||'','date',false,'required')+field('Amount (₹)','amount',v.amount==null?'':v.amount,'number',false,'required step="0.01" min="-100000000" max="100000000"')+select('Category','category',Array.from(new Set(categories().concat(v.category))).map(function(c){return [c,c];}),v.category,false,'required')+select('Paid by','paidBy',options,v.paidBy,false,'required')+select('How should this be treated?','treatment',D.types.map(function(t){return [t,{covered:'Covered by a plan item',additional:'Additional shared expense',personal:'Personal (outside family split)',direct:'Direct repayment by a member',owner:'Recover from landlord / owner'}[t]];}),v.treatment,true)+'<div class="field full" id="budget-link-field"><label for="form-budgetId">Covered by which plan item?</label><select name="budgetId" id="form-budgetId"></select></div><div class="field full" id="recover-field"><label for="form-recoverFrom">'+(v.treatment==='owner'?'Owner / landlord name':'Member who will repay')+'</label><select name="recoverFrom" id="form-recoverFrom">'+[['','Choose a member']].concat(options).map(function(o){return '<option value="'+o[0]+'" '+(o[0]===v.recoverFrom?'selected':'')+'>'+esc(o[1])+'</option>';}).join('')+'</select><input id="owner-name" name="ownerName" value="'+esc(v.treatment==='owner'?v.recoverFrom||'Landlord':'Landlord')+'" placeholder="Owner name"></div><p class="sub field full">Use a negative amount for a refund. The date determines the expense month. Personal, direct and owner entries stay outside shared spending.</p>';
+    var existingDirect=old&&old.treatment==='direct',payment=table==='Transfers'&&old?D.repaymentInfo(old.note):null;
+    var direct=existingDirect?D.repaymentInfo(old.description):null;
+    if(table==='Expenses')body=field('What was it for?','description',direct?direct.text:v.description||'','text',true,'required maxlength="300"')+field('Date','date',v.date||'','date',false,'required')+field('Amount (₹)','amount',v.amount==null?'':v.amount,'number',false,'required step="0.01" min="-100000000" max="100000000"')+select('Category','category',Array.from(new Set(categories().concat(v.category))).map(function(c){return [c,c];}),v.category,false,'required')+select('Paid by','paidBy',options,v.paidBy,false,'required')+select('How should this be treated?','treatment',D.types.map(function(t){return [t,{covered:'Covered by a plan item',additional:'Additional shared expense',personal:'Personal (outside family split)',direct:'Direct repayment by a member',owner:'Recover from landlord / owner'}[t]];}),v.treatment,true)+'<div class="field full" id="budget-link-field"><label for="form-budgetId">Covered by which plan item?</label><select name="budgetId" id="form-budgetId"></select></div><div class="field full" id="recover-field"><label for="form-recoverFrom">'+(v.treatment==='owner'?'Owner / landlord name':'Member who will repay')+'</label><select name="recoverFrom" id="form-recoverFrom">'+[['','Choose a member']].concat(options).map(function(o){return '<option value="'+o[0]+'" '+(o[0]===v.recoverFrom?'selected':'')+'>'+esc(o[1])+'</option>';}).join('')+'</select><input id="owner-name" name="ownerName" value="'+esc(v.treatment==='owner'?v.recoverFrom||'Landlord':'Landlord')+'" placeholder="Owner name"></div>'+repaymentField('repayment',direct?direct.split:'',!!direct&&direct.split==='total')+'<p class="sub field full">Use a negative amount for a refund. The date determines the expense month. Personal, direct and owner entries stay outside shared spending.</p>';
     if(table==='Budgets')body=field('Budget item','description',v.description||'','text',true,'required maxlength="300"')+field('Budget month','month',v.month,'month',false,'required')+field('Planned amount (₹)','amount',v.amount==null?'':v.amount,'number',false,'required min="0" max="100000000" step="0.01"')+select('Category','category',Array.from(new Set(categories().concat(v.category))).map(function(c){return [c,c];}),v.category,false,'required')+select('Assigned to','assignedTo',[['','Unassigned']].concat(options),v.assignedTo,false)+ '<p class="sub field full">A budget is a plan. Use “Log payment” when the bill is actually paid, so it appears in recorded spending.</p>';
-    if(table==='Transfers')body=field('Payment date','date',v.date,'date',false,'required')+field('Amount (₹)','amount',v.amount==null?'':v.amount,'number',false,'required min="0.01" max="100000000" step="0.01"')+select('From member','from',options,v.from,false,'required')+select('To member','to',options,v.to,false,'required')+field('Note (optional)','note',v.note||'','text',true,'maxlength="500"')+'<p class="sub field full">Only record a transfer after the money has moved. It reduces the sender’s balance without becoming an expense.</p>';
+    if(table==='Transfers')body=field('Payment date','date',v.date,'date',false,'required')+field('Amount (₹)','amount',v.amount==null?'':v.amount,'number',false,'required min="0.01" max="100000000" step="0.01"')+select('From member','from',options,v.from,false,'required')+select('To member','to',options,v.to,false,'required')+repaymentField('payment',payment?payment.split:v.repaymentSplit||'',!!payment&&payment.split==='total')+field('Note (optional)','note',payment?payment.text:v.note||'','text',true,'maxlength="500"')+'<p class="sub field full">Only record a transfer after the money has moved. It reduces the sender’s balance without becoming an expense.</p>';
     if(table==='Members')body=field('Member name','name',v.name,'text',true,'required maxlength="100"')+field('Google email','email',v.email,'email',true,old&&old.id===S.db.settings.headId?'readonly':'')+field('First active month','activeFrom',v.activeFrom,'month',false,'required')+field('Last active month (optional)','activeTo',v.activeTo,'month',false)+field('Share weight','weight',v.weight,'number',false,'required min="0" max="100" step="0.1"')+'<p class="sub field full">Keep weight 1 for equal shares. Weight 0 excludes a member from sharing costs. Membership end dates preserve earlier months.</p><label class="checkbox field full"><span><input type="checkbox" name="grantAccess" value="yes" checked> Grant this Google account edit access to the sheet. Google may send a sharing notification.</span></label>';
     var actions='<div class="form-actions">'+(old&&table!=='Members'?'<button class="button danger" type="button" data-archive="'+table+'" data-id="'+old.id+'">'+icon('trash')+'Move to trash</button>':'')+(old&&table==='Members'&&old.id!==S.db.settings.headId&&old.email?'<button class="button danger" type="button" data-access="revoke" data-id="'+old.id+'">Remove sheet access</button>':'')+'<button class="button" type="button" data-action="close">Cancel</button><button class="button primary" type="submit">Save '+(table==='Members'?'member':table==='Budgets'?'plan item':table==='Transfers'?'transfer':'expense')+'</button></div>';
-    openModal((old?'Edit ':'Add ')+(table==='Members'?'member':table==='Budgets'?'plan item':table==='Transfers'?'transfer':'expense'),S.demo?'Demo · changes stay on this device':'Changes are saved directly to your Google Sheet','<form id="record-form" data-request-id="'+(typeof crypto.randomUUID==='function'?crypto.randomUUID():String(Date.now()))+'" data-table="'+table+'" data-id="'+(old?old.id:'')+'"><div class="form-grid">'+body+'</div>'+(old&&old.sourceRow?'<p class="sub spaced">'+'Imported from '+esc(old.sourceRow)+'. '+(!old.date&&table==='Expenses'?'Add its real date before saving.':'')+'</p>':'')+'<div id="record-error"></div>'+actions+'</form>');
+    openModal(table==='Transfers'?(old?'Edit payment':'Record payment'):(old?'Edit ':'Add ')+(table==='Members'?'member':table==='Budgets'?'plan item':'expense'),S.demo?'Demo · changes stay on this device':'Changes are saved directly to your Google Sheet','<form id="record-form" data-request-id="'+(typeof crypto.randomUUID==='function'?crypto.randomUUID():String(Date.now()))+'" data-table="'+table+'" data-id="'+(old?old.id:'')+'"><div class="form-grid">'+body+'</div>'+(old&&old.sourceRow?'<p class="sub spaced">'+'Imported from '+esc(old.sourceRow)+'. '+(!old.date&&table==='Expenses'?'Add its real date before saving.':'')+'</p>':'')+'<div id="record-error"></div>'+actions+'</form>');
     if(table==='Expenses')expenseFields(v.budgetId||'');
   }
-  function expenseFields(selected){var form=$('record-form');if(!form||form.dataset.table!=='Expenses')return;var treatment=form.elements.treatment.value,date=form.elements.date.value,selectedId=selected!==undefined?selected:$('form-budgetId').value;var budgets=S.db.budgets.filter(function(b){return !b.deletedAt&&b.month===date.slice(0,7);});$('form-budgetId').innerHTML='<option value="">Choose a plan item</option>'+budgets.map(function(b){return '<option value="'+b.id+'" '+(b.id===selectedId?'selected':'')+'>'+esc(b.description)+' · '+money(b.amount)+'</option>';}).join('');$('budget-link-field').style.display=treatment==='covered'?'flex':'none';$('form-budgetId').required=treatment==='covered';$('recover-field').style.display=treatment==='direct'||treatment==='owner'?'flex':'none';$('form-recoverFrom').style.display=treatment==='direct'?'block':'none';$('form-recoverFrom').required=treatment==='direct';$('owner-name').style.display=treatment==='owner'?'block':'none';$('recover-field').querySelector('label').htmlFor=treatment==='owner'?'owner-name':'form-recoverFrom';$('recover-field').querySelector('label').textContent=treatment==='owner'?'Owner / landlord name':'Member who will repay';}
+  function expenseFields(selected){var form=$('record-form');if(!form||form.dataset.table!=='Expenses')return;var treatment=form.elements.treatment.value,date=form.elements.date.value,selectedId=selected!==undefined?selected:$('form-budgetId').value;var budgets=S.db.budgets.filter(function(b){return !b.deletedAt&&b.month===date.slice(0,7);});$('form-budgetId').innerHTML='<option value="">Choose a plan item</option>'+budgets.map(function(b){return '<option value="'+b.id+'" '+(b.id===selectedId?'selected':'')+'>'+esc(b.description)+' · '+money(b.amount)+'</option>';}).join('');$('budget-link-field').style.display=treatment==='covered'?'flex':'none';$('form-budgetId').required=treatment==='covered';$('recover-field').style.display=treatment==='direct'||treatment==='owner'?'flex':'none';$('form-recoverFrom').style.display=treatment==='direct'?'block':'none';$('form-recoverFrom').required=treatment==='direct';$('owner-name').style.display=treatment==='owner'?'block':'none';$('recover-field').querySelector('label').htmlFor=treatment==='owner'?'owner-name':'form-recoverFrom';$('recover-field').querySelector('label').textContent=treatment==='owner'?'Owner / landlord name':'Member who will repay';
+    $('repayment-field').style.display=treatment==='direct'?'flex':'none';
+    form.elements.repaymentSplit.disabled=treatment!=='direct';
+  }
   function connectModal(){openModal('Connect a Google Sheet','Use a Ghar family database or prepare an existing spreadsheet.','<form id="connect-form"><div class="form-grid">'+field('Google Sheets URL or spreadsheet ID','sheet','','text',true,'required placeholder="https://docs.google.com/spreadsheets/d/…"')+'</div><p class="sub spaced">Your Google account must have access. If this is an existing Ghar family, the head must also list your Google email. Other spreadsheets can be initialized with new Ghar tabs.</p><div id="connect-error"></div><div class="form-actions"><button class="button" type="button" data-action="close">Cancel</button><button class="button primary" type="submit">Check sheet '+icon('arrow')+'</button></div></form>');}
   function shareModal(){if(S.demo){openModal('Sharing works in the Google app','This preview is a local demo.','<p class="body-text">After installation, add family Google emails in Settings and grant sheet access. Use “Share family link” to copy a join link for that family.</p><div class="form-actions">'+button('close','Got it','','primary')+'</div>');return;}var join=S.db.appUrl+'?family='+encodeURIComponent(S.db.connection.id);openModal('Bring your family together','Members need their own listed Google email and edit access to the sheet.','<div class="field"><label for="join-link">Family join link</label><input id="join-link" value="'+esc(join)+'" readonly></div><p class="sub section">Only Google accounts with sheet access and active Ghar membership can load the family data. Give this link to your family after adding their emails in Settings.</p><div class="form-actions">'+button('copy-join','Copy join link','copy','primary')+button('close','Close')+'</div>');}
   function mobileSetup(){openModal('Connect the phone app','The owner completes this once before sharing the app link.','<p class="body-text">Open the mobile setup guide for the Google Cloud connection and GitHub Pages steps. Configure the public client ID and API executable deployment ID in app-config.js, then upload the site files. Family members use Continue with Google after that.</p><p class="sub section">Your existing sheet and family records stay in the same Google backend.</p><div class="form-actions"><a class="button primary" href="MOBILE-SETUP.html" target="_blank" rel="noopener">Open setup guide</a>'+button('close','Close')+'</div>');}
   function phoneHelp(){openModal('Install Ghar on your phone','One shared link. Each person signs in with their own Google account.','<ol><li><strong>Android:</strong> open this link in Chrome. Choose Install app or Add to Home screen from the browser menu.</li><li><strong>iPhone:</strong> open this link in Safari. Tap Share → Add to Home Screen, enable Open as Web App if shown, and tap Add.</li><li>Open Ghar from the new home-screen icon and continue with Google.</li></ol><p class="sub section">An internet connection is needed to load and save family data. This is an installed web app; no APK or IPA is included.</p><div class="form-actions">'+button('close','Got it','','primary')+'</div>');}
-  function helpModal(){openModal('How Ghar works','A shared UI with your own Google Sheet as the database.','<p class="body-text">Plan costs in Monthly plan. Add paid purchases in Expenses. Record money sent between family members in Transfers. The family split uses active members and weights.</p><ol><li>Recorded spending = covered purchases + additional shared expenses.</li><li>Family Split has Plan (initial assigned costs), Extras (additional contributions) and Total (Plan + Extras). Covered purchases are not added twice.</li><li>Recorded transfers and direct repayments adjust Total only. Plan and Extras remain separate before repayments. Personal and owner records stay outside the shared split.</li><li>Transfers reduce the sender’s balance and increase the receiver’s balance toward zero.</li><li>Electricity calculates floor usage and shares fixed-floor shortfalls and bill charges. Copy only your family’s amount to one monthly plan item.</li><li>Direct edits to Ghar database tabs appear on refresh or within 30 seconds while the app is visible. Open edit forms pause automatic refresh.</li></ol><p class="body-text">Google sign-in and file permissions are checked by the server. The head manages members and family settings. Direct sheet editors can also change the database according to their Google permissions.</p><div class="form-actions">'+button('close','Got it','','primary')+'</div>',true);}
+  function helpModal(){openModal('How Ghar works','A shared UI with your own Google Sheet as the database.','<p class="body-text">Plan costs in Monthly plan. Add paid purchases in Expenses. Record money sent between family members in Transfers. The family split uses active members and weights.</p><ol><li>Recorded spending = covered purchases + additional shared expenses.</li><li>Family Split has Plan (initial assigned costs), Extras (additional contributions) and Total (Plan + Extras). Covered purchases are not added twice.</li><li>Choose Plan or Extras for each payment or direct repayment. Total counts each adjustment once. Edit older entries to allocate them to a split.</li><li>Transfers reduce the sender’s balance and increase the receiver’s balance toward zero.</li><li>Electricity calculates floor usage and shares fixed-floor shortfalls and bill charges. Copy only your family’s amount to one monthly plan item.</li><li>Direct edits to Ghar database tabs appear on refresh or within 30 seconds while the app is visible. Open edit forms pause automatic refresh.</li></ol><p class="body-text">Google sign-in and file permissions are checked by the server. The head manages members and family settings. Direct sheet editors can also change the database according to their Google permissions.</p><div class="form-actions">'+button('close','Got it','','primary')+'</div>',true);}
   function installModal(){openModal('Activate the Google version','One owner installs once. Family members then use the shared link.','<ol><li>Extract the ZIP and open <code>START-HERE.html</code> for the installation walkthrough.</li><li>Create a new standalone Google Apps Script project.</li><li>Paste the supplied <code>Code.gs</code>, <code>Index.html</code> and <code>appsscript.json</code>.</li><li>Deploy as <strong>User accessing the web app</strong>, with access for Google accounts.</li><li>Open the production <code>/exec</code> URL. Google handles sign-in. Create your family from the app.</li></ol><p class="body-text">No API key, OAuth client secret or separate server is required. Google’s authorization and Workspace policies still apply.</p><div class="form-actions">'+button('close','Close','','primary')+'</div>');}
   function launchModal(){openModal('Open your Google app','Paste the production URL once. This launcher will remember it on this device.','<form id="launch-form"><div class="field"><label for="live-url">Google Apps Script web app URL</label><input type="url" name="url" id="live-url" required placeholder="https://script.google.com/macros/s/…/exec" value="'+esc(storageGet('ghar-live-url'))+'"></div><p class="sub section">The live Google app opens in a new tab. If it has not been installed yet, use the installation guide included in the ZIP.</p><div id="launch-error"></div><div class="form-actions">'+button('install','Installation guide')+'<button class="button primary" type="submit">Continue with Google '+icon('external')+'</button></div></form>');}
   function showError(id,error){var target=$(id);if(target)target.innerHTML='<div class="form-error" role="alert">'+esc(error.message||error)+'</div>'+(remote&&error.code==='AUTH_REQUIRED'?button('remote-reauthorize','Continue with Google','lock','soft'):'');else toast(error.message||String(error));}
   function download(name,text,type){var u=URL.createObjectURL(new Blob([text],{type:type||'text/plain;charset=utf-8'})),a=document.createElement('a');a.href=u;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(u);},1500);}
   function csv(name,head,rows){function cell(v){if(typeof v==='number')return String(v);var s=String(v==null?'':v);if(/^\s*[=+\-@]/.test(s))s="'"+s;return '"'+s.replace(/"/g,'""')+'"';}download(name,'\ufeff'+[head].concat(rows).map(function(r){return r.map(cell).join(',');}).join('\r\n'),'text/csv;charset=utf-8');toast('CSV downloaded.');}
   async function copyText(text){try{await navigator.clipboard.writeText(text);toast('Copied.');}catch(e){download('Ghar-summary.txt',text);toast('Summary downloaded.');}}
-  function splitText(){var r=report(),label={plan:'Plan',extras:'Extras',total:'Total'}[S.splitMode];if(!r.split.valid)return r.split.reason;return S.db.settings.familyName+' · '+labelMonth(S.month)+'\n'+label+' split: '+money(r.split.total)+'\nPlan: '+money(r.planned)+' · Extras: '+money(r.additional)+' · Total: '+money(r.expected)+'\n\n'+r.split.lines.map(function(p){return p.name+': '+money(Math.abs(p.net))+(p.net>0?' to contribute':p.net<0?' to receive':' balanced');}).join('\n')+'\n\n'+(S.splitMode==='total'?'Total includes recorded transfers and direct repayments once.':'Before repayments. Check Total for the remaining balance.')+' Planned assignments are not proof of payment.';}
+  function splitText(){var r=report(),label={plan:'Plan',extras:'Extras',total:'Total'}[S.splitMode];if(!r.split.valid)return r.split.reason;return S.db.settings.familyName+' · '+labelMonth(S.month)+'\n'+label+' split: '+money(r.split.total)+'\nPlan: '+money(r.planned)+' · Extras: '+money(r.additional)+' · Total: '+money(r.expected)+'\n\n'+r.split.lines.map(function(p){return p.name+': '+money(Math.abs(p.net))+(p.net>0?' to contribute':p.net<0?' to receive':' balanced');}).join('\n')+'\n\n'+(S.splitMode==='total'?'Total includes each repayment once.':'Balances include repayments applied to '+label+'.')+' Planned assignments are not proof of payment.';}
   function go(view){settingsDirty=false;S.view=view;S.search='';S.payer='all';S.type='all';render();window.scrollTo({top:0,behavior:'instant'});}
   async function connect(id){S.db=await rpc('connect',{sheet:id});S.boot=await rpc('bootstrap');S.view='overview';render();window.scrollTo({top:0,behavior:'instant'});toast(S.demo?'Demo family opened.':'Family sheet connected.');}
   async function sample(){var b=await rpc('bootstrap');var result=await rpc('initialize',{setup:{nonce:'demo-'+Date.now(),familyName:'Sample Family',startMonth:today().slice(0,7),headIndex:0,members:[{name:'You',email:b.profile.email},{name:'Priya',email:'priya@example.net'},{name:'Arjun',email:'arjun@example.net'}]}});var db=result.state,m=db.members,period=today().slice(0,7),dt=today();var budgetRows=[['Home rent','Rent',18000,m[0].id],['Groceries & essentials','Groceries',7000,m[1].id],['Electricity & gas','Utilities',3000,m[2].id],['Family extras','Other',2000,m[0].id]];
     for(var x of budgetRows)await rpc('save',{table:'Budgets',values:{month:period,description:x[0],category:x[1],amount:x[2],assignedTo:x[3]}});
     db=await rpc('state');var rent=db.budgets.find(function(x){return x.description==='Home rent';}),gro=db.budgets.find(function(x){return x.category==='Groceries';});var entries=[{description:'Rent payment',category:'Rent',amount:18000,paidBy:m[0].id,treatment:'covered',budgetId:rent.id},{description:'Weekly groceries',category:'Groceries',amount:2150,paidBy:m[1].id,treatment:'covered',budgetId:gro.id},{description:'Vegetables and fruit',category:'Groceries',amount:740,paidBy:m[2].id,treatment:'covered',budgetId:gro.id},{description:'Family dinner',category:'Food & outings',amount:1650,paidBy:m[2].id,treatment:'additional'}];for(var e of entries)await rpc('save',{table:'Expenses',values:Object.assign({date:dt},e)});await rpc('save',{table:'Transfers',values:{date:dt,from:m[1].id,to:m[0].id,amount:2000,note:'Sample contribution'}});var floorIds=[0,1,2,3].map(function(){return 'ef_'+randomId().replace(/-/g,'');});await rpc('saveElectricity',{requestId:randomId(),values:{month:period,description:'Sample building bill',readingsTakenAt:dt+'T09:30:00+05:30',rate:6,fixedCharge:1200,totalOverride:'',collectorFloorId:floorIds[1]},floors:[100,250,150,100].map(function(u,i){return {id:floorIds[i],name:['Ground floor','First floor','Second floor','Third floor'][i],family:i===1||i===2,meterMode:'units',units:u,paymentMode:i===0?'fixed':'metered',fixedAmount:i===0?600:0,weight:1};})});S.db=await rpc('state');S.boot=await rpc('bootstrap');S.view='overview';render();window.scrollTo({top:0,behavior:'instant'});toast('Sample dashboard loaded. All data is fictional.');}
   document.addEventListener('click',async function(event){var t=event.target.closest('[data-action],[data-go],[data-month],[data-edit],[data-restore],[data-archive],[data-access],[data-connect],[data-setting-tab],[data-basis],[data-pay-budget],[data-suggest-from],[data-electricity-edit],[data-electricity-post]');if(!t)return;if(S.saving){event.preventDefault();return;}try{
-    if(remote&&t.dataset.action==='remote-sign-in'){await remote.authorize();await start(false);return;}
-    if(remote&&t.dataset.action==='remote-reauthorize'){await remote.authorize();var boot=await rpc('bootstrap');if(S.db&&boot.profile.email!==S.db.profile.email){closeModal();S.db=null;await start(false);}else{S.boot=boot;toast('Google connected. Retry your save when ready.');}return;}
-    if(remote&&t.dataset.action==='remote-sign-out'){clearInterval(poll);remote.signOut();closeModal();S.db=null;S.boot=null;landing();toast('Signed out on this device.');return;}
+    if(remote&&t.dataset.action==='remote-sign-in'){await signIn(false,false);return;}
+    if(remote&&t.dataset.action==='remote-reauthorize'){await signIn(false,true);return;}
+    if(remote&&t.dataset.action==='remote-switch-account'){await signIn(true,!!S.db);return;}
+    if(remote&&t.dataset.action==='remote-sign-out'){
+      clearInterval(poll);
+      remote.signOut();
+      closeModal();
+      S.db=null;S.boot=null;S.error='';settingsDirty=false;
+      landing();
+      toast('Signed out on this device.');
+      return;
+    }
     if(t.dataset.action==='mobile-setup'){mobileSetup();return;}
     if(t.dataset.action==='phone-install'){var outcome=await GharPhone.install();if(outcome==='installed')toast('Ghar is already installed.');else if(outcome==='instructions')phoneHelp();return;}
     if(t.dataset.action==='phone-update'){if(settingsDirty){toast('Save your family settings before updating the app.');return;}if($('modal-root').children.length){toast('Close your editor before updating the app.');return;}toast(GharPhone.update()?'Updating Ghar…':'Checking for an update. Reopen this option shortly, or close and reopen Ghar.');return;}
@@ -620,7 +949,15 @@ var GharHistoryUI=(function(){
     var action=t.dataset.action;
     if(await H.action(action,t))return;
     if(await E.action(action,t))return;
-    if(action==='record-split-payment'){var remaining=D.report(S.db,S.month,'total').split,first=remaining.valid&&remaining.suggestions[0];editRecord('Transfers',null,{from:first?first.from:S.db.meId,to:first?first.to:S.db.members.find(function(m){return m.id!==S.db.meId;})?.id||S.db.settings.headId,note:({plan:'Plan',extras:'Extras',total:'Total'}[S.splitMode])+' contribution'});return;}
+    if(action==='record-split-payment'){
+      var remaining=report().split,first=remaining.valid&&remaining.suggestions[0];
+      editRecord('Transfers',null,{
+        from:first?first.from:S.db.meId,
+        to:first?first.to:S.db.members.find(function(m){return m.id!==S.db.meId;})?.id||S.db.settings.headId,
+        repaymentSplit:S.splitMode==='total'?'':S.splitMode
+      });
+      return;
+    }
     if(action==='close'){closeModal();return;}if(action==='reload'){location.reload();return;}if(action==='launch'){launchModal();return;}if(action==='install'){if(remote)mobileSetup();else installModal();return;}if(action==='help'){helpModal();return;}if(action==='share'){shareModal();return;}
     if(action==='demo'){await start(true);return;}if(action==='landing'){S.db=null;landing();return;}if(action==='sample'){t.disabled=true;await sample();return;}
     if(action==='new-family'){closeModal();setupDraft();return;}if(action==='connect'){connectModal();return;}if(action==='cancel-setup'){S.draft=null;if(S.db){S.view='overview';render();}else renderOnboarding();return;}
@@ -628,10 +965,24 @@ var GharHistoryUI=(function(){
     if(action==='add-expense'){editRecord('Expenses');return;}if(action==='add-budget'){editRecord('Budgets');return;}if(action==='add-transfer'){editRecord('Transfers');return;}if(action==='add-member'){editRecord('Members');return;}
     if(action==='copy-join'){await copyText($('join-link').value);return;}if(action==='copy-split'){await copyText(splitText());return;}if(action==='print'){window.print();return;}
     if(action==='backup'){download('Ghar-'+S.db.settings.familyName.replace(/[^a-z0-9]+/gi,'-')+'-'+today()+'.json',JSON.stringify({version:D.VERSION,exportedAt:new Date().toISOString(),data:S.db},null,2),'application/json');return;}
-    if(action==='csv-expenses'){csv('Ghar-'+S.month+'-Expenses.csv',['ID','Date','Month','Description','Category','Amount','PaidBy','Treatment','BudgetID','RecoverFrom'],filteredExpenses().map(function(e){return [e.id,e.date,e.month,e.description,e.category,e.amount,memberName(e.paidBy),e.treatment,e.budgetId,e.treatment==='direct'?memberName(e.recoverFrom):e.recoverFrom];}));return;}
+    if(action==='csv-expenses'){
+      csv('Ghar-'+S.month+'-Expenses.csv',['ID','Date','Month','Description','Category','Amount','PaidBy','Treatment','BudgetID','RecoverFrom','RepaymentSplit'],
+        filteredExpenses().map(function(e){
+          var repayment=expenseRepayment(e);
+          return [e.id,e.date,e.month,repayment.text,e.category,e.amount,memberName(e.paidBy),e.treatment,e.budgetId,
+            e.treatment==='direct'?memberName(e.recoverFrom):e.recoverFrom,repayment.split?storedRepaymentLabel(repayment.split):''];
+        }));
+      return;
+    }
     if(action==='csv-budgets'){csv('Ghar-'+S.month+'-Plan.csv',['ID','Month','Description','Category','PlannedAmount','AssignedTo'],report().budgets.map(function(b){return [b.id,b.month,b.description,b.category,b.amount,memberName(b.assignedTo)];}));return;}
-    if(action==='csv-transfers'){csv('Ghar-'+S.month+'-Transfers.csv',['Date','From','To','Amount','Note'],report().transfers.map(function(t){return [t.date,memberName(t.from),memberName(t.to),t.amount,t.note];}));return;}
-    if(action==='csv-family'){var r=report();if(!r.split.valid)throw new Error(r.split.reason);csv('Ghar-'+S.month+'-'+S.splitMode+'-Split.csv',['Member','Basis','Share','Credit','BalanceBeforeRepayments','Sent','Received','DirectAdjustment','RemainingPositiveOwes','PlanShare','PlanAssigned','PlanBalance','ExtrasShare','ExtrasPaid','ExtrasBalance'],r.split.lines.map(function(p){return [p.name,S.splitMode,p.share,p.paid,p.gross,p.sent,p.received,p.direct,p.net,p.planShare,p.planPaid,p.planNet,p.extrasShare,p.extrasPaid,p.extrasNet];}));return;}
+    if(action==='csv-transfers'){
+      csv('Ghar-'+S.month+'-Transfers.csv',['Date','From','To','Amount','Note','AppliesTo'],report().transfers.map(function(t){
+        var repayment=D.repaymentInfo(t.note);
+        return [t.date,memberName(t.from),memberName(t.to),t.amount,repayment.text,storedRepaymentLabel(repayment.split)];
+      }));
+      return;
+    }
+    if(action==='csv-family'){var r=report();if(!r.split.valid)throw new Error(r.split.reason);csv('Ghar-'+S.month+'-'+S.splitMode+'-Split.csv',['Member','Basis','Share','Credit','BalanceBeforeRepayments','Sent','Received','DirectAdjustment','RemainingPositiveOwes','PlanShare','PlanAssigned','PlanRemaining','ExtrasShare','ExtrasPaid','ExtrasRemaining','TotalOnlyAdjustment'],r.split.lines.map(function(p){return [p.name,S.splitMode,p.share,p.paid,p.gross,p.sent,p.received,p.direct,p.net,p.planShare,p.planPaid,p.planNet,p.extrasShare,p.extrasPaid,p.extrasNet,p.totalOnlyAdjustment];}));return;}
     if(action==='copy-budget'){openModal('Copy a monthly plan','Existing items with the same description and category are skipped.','<form id="copy-budget-form"><div class="form-grid">'+select('Copy from','fromMonth',months().map(function(m){return [m,labelMonth(m)];}),months().filter(function(m){return m<S.month;}).slice(-1)[0]||S.month,false)+field('Copy into','toMonth',S.month,'month',false,'required')+'</div><div id="copy-error"></div><div class="form-actions">'+button('close','Cancel')+'<button class="button primary" type="submit">Copy plan</button></div></form>');return;}
     if(action==='disconnect'){openModal('Disconnect this sheet?','This affects only the current signed-in account.','<p class="body-text">The Google file and other members’ connections remain intact. You can reconnect using its link.</p><form id="disconnect-form"><div id="disconnect-error"></div><div class="form-actions">'+button('close','Cancel')+'<button class="button danger" type="submit">Disconnect sheet</button></div></form>');return;}
     if(action==='reset-demo'){openModal('Reset the local demo?','Only sample data stored on this device will be cleared.','<form id="reset-demo-form"><div class="form-actions">'+button('close','Cancel')+'<button class="button danger" type="submit">Reset demo</button></div></form>');return;}
@@ -643,7 +994,24 @@ var GharHistoryUI=(function(){
       if(form.id==='launch-form'){var u=new URL(values.url);if(u.origin!=='https://script.google.com'||!/^\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(u.pathname))throw new Error('Use the Google Apps Script production URL ending in /exec.');try{localStorage.setItem('ghar-live-url',u.href);}catch(e){}window.open(u.href,'_blank','noopener');closeModal();return;}
       if(form.id==='connect-form'){var info=await rpc('inspect',{sheet:values.sheet});if(info.ready){closeModal();await connect(info.id);}else{closeModal();setupDraft(info);}return;}
       if(form.id==='setup-form'){captureSetup();var d=S.draft;D.required(d.familyName,'Family name');D.month(d.startMonth);if(S.setupStep===2){var names=new Set(),emails=new Set();d.members.forEach(function(m,i){m.name=D.required(m.name,'Each member name');m.email=i===d.headIndex?S.boot.profile.email:D.email(m.email===S.boot.profile.email?'':m.email);if(names.has(m.name.toLowerCase()))throw new Error('Give each member a different name.');names.add(m.name.toLowerCase());if(m.email){if(emails.has(m.email))throw new Error('Google emails must be different.');emails.add(m.email);}});}if(S.setupStep<3){S.setupStep++;renderSetup();return;}var result=await rpc('initialize',{setup:d});S.db=result.state;S.boot=await rpc('bootstrap');S.view='overview';S.month=d.startMonth>S.month?d.startMonth:S.month;S.draft=null;render();window.scrollTo({top:0,behavior:'instant'});toast(result.warnings&&result.warnings.length?result.warnings.join(' '):S.demo?'Demo family created.':'Your family sheet is ready.');return;}
-      if(form.id==='record-form'){var table=form.dataset.table,id=form.dataset.id,old=id?S.db[table.toLowerCase()].find(function(x){return x.id===id;}):null;if(table==='Expenses'&&values.treatment==='owner')values.recoverFrom=values.ownerName;var clean=D.validate(table,values,S.db,old);await mutate('save',{table:table,id:id,revision:old&&old._rev,requestId:form.dataset.requestId,values:clean,grantAccess:values.grantAccess==='yes'});return;}
+      if(form.id==='record-form'){
+        var table=form.dataset.table,id=form.dataset.id;
+        var old=id?S.db[table.toLowerCase()].find(function(x){return x.id===id;}):null;
+        if(table==='Transfers'){
+          var legacyTransfer=old&&D.repaymentInfo(old.note).split==='total';
+          values.note=D.repaymentValue(values.note,values.repaymentSplit,500,legacyTransfer);
+        }
+        if(table==='Expenses'){
+          if(values.treatment==='owner')values.recoverFrom=values.ownerName;
+          if(values.treatment==='direct'){
+            var legacyDirect=old&&old.treatment==='direct'&&D.repaymentInfo(old.description).split==='total';
+            values.description=D.repaymentValue(D.required(values.description,'Expense description'),values.repaymentSplit,300,legacyDirect);
+          }
+        }
+        var clean=D.validate(table,values,S.db,old);
+        await mutate('save',{table:table,id:id,revision:old&&old._rev,requestId:form.dataset.requestId,values:clean,grantAccess:values.grantAccess==='yes'});
+        return;
+      }
       if(form.id==='confirm-archive'){var old=S.db[form.dataset.table.toLowerCase()].find(function(r){return r.id===form.dataset.id;});await mutate('archive',{table:form.dataset.table,id:old.id,revision:old._rev},'Entry moved to trash.');return;}
       if(form.id==='confirm-access'){await mutate(form.dataset.access,{memberId:form.dataset.id},form.dataset.access==='grant'?'Sheet access granted.':'Explicit editor access removed.');return;}
       if(form.id==='family-settings'){var cats=String(values.categories).split('\n').map(function(x){return x.trim();}).filter(Boolean);await mutate('settings',{familyName:values.familyName,headId:values.headId,categories:cats,revision:S.db.settingsRevision},'Family settings saved.');return;}
@@ -657,6 +1025,20 @@ var GharHistoryUI=(function(){
   document.addEventListener('keydown',function(event){if(S.saving){event.preventDefault();return;}if(!$('modal-root').children.length)return;if(event.key==='Escape'){closeModal();return;}if(event.key==='Tab'){var list=Array.from($('modal-root').querySelectorAll('button,input,select,textarea,a')).filter(function(x){return !x.disabled&&x.getClientRects().length;});if(!list.length)return;if(event.shiftKey&&document.activeElement===list[0]){event.preventDefault();list[list.length-1].focus();}else if(!event.shiftKey&&document.activeElement===list[list.length-1]){event.preventDefault();list[0].focus();}}});
   var H=GharHistoryUI.create({S:S,esc:esc,money:money,button:button,notice:notice,empty:empty,openModal:openModal,mutate:mutate,csv:csv,render:render});
   var E=GharElectricityUI.create({S:S,D:D,esc:esc,money:money,button:button,notice:notice,labelMonth:labelMonth,stats:stats,empty:empty,openModal:openModal,mutate:mutate,csv:csv});
-  if(live)start(false);else landing();
+  async function resumeRemembered(){
+    if(S.view!=='landing'||S.demo||!remote.rememberedDevice()||remote.hasSession())return;
+    try{
+      await remote.authorize({silent:true});
+      if(S.view==='landing'&&!S.demo&&!S.saving)await start(false);
+    }catch(e){/* The Google button is ready if the browser needs a tap. */}
+  }
+  if(live||(remote&&remote.hasSession()))start(false);
+  else{
+    landing();
+    if(remote&&remote.rememberedDevice()){
+      if(window.google&&window.google.accounts&&window.google.accounts.oauth2)resumeRemembered();
+      else if($('google-auth-library'))$('google-auth-library').addEventListener('load',resumeRemembered,{once:true});
+    }
+  }
 })();
 </script></body></html>
